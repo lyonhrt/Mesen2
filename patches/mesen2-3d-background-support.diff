@@ -658,7 +658,7 @@ index 0000000..dd9e0d3
 +}
 diff --git a/Core/Model.h b/Core/Model.h
 new file mode 100644
-index 0000000..2494ece
+index 0000000..a94e6ec
 --- /dev/null
 +++ b/Core/Model.h
 @@ -0,0 +1,87 @@
@@ -691,10 +691,13 @@ index 0000000..2494ece
 +    void ProcessNode(aiNode *node, const aiScene *scene);
 +    Mesh ProcessMesh(aiMesh *mesh, const aiScene *scene);
 +    void LoadAnimations(const aiScene *scene);
++    std::vector<Texture> LoadMaterialTextures(aiMaterial *mat, aiTextureType type, const std::string& typeName);
++    unsigned int TextureFromFile(const char* path, const std::string& directory);
 +
 +    std::vector<Mesh> meshes;
 +    std::string directory;
 +    const aiScene* scene = nullptr;
++    std::vector<Texture> textures_loaded;
 +    
 +    // Animation data
 +    struct PositionKey {
@@ -741,10 +744,10 @@ index 0000000..2494ece
 +};
 diff --git a/Core/Model.cpp b/Core/Model.cpp
 new file mode 100644
-index 0000000..4f2c230
+index 0000000..c97f642
 --- /dev/null
 +++ b/Core/Model.cpp
-@@ -0,0 +1,232 @@
+@@ -0,0 +1,331 @@
 +#include "Model.h"
 +#include <iostream>
 +#include "stb_image.h"
@@ -1005,52 +1008,405 @@ index 0000000..4f2c230
 +
 +void Model::Animation::Apply(const aiScene* scene)
 +{
-+    // Implementation to apply animation transforms to nodes
-+    // This would update the transformation matrices of each affected node
-+    // based on the keyframe data for the current animation time
-+    
-+    // For each node animation
++    // Apply animation transformations to the model's nodes
++    // For each node in the animation
 +    for(const auto& nodeAnim : NodeAnimations) {
 +        // Find the node in the scene
 +        aiNode* node = scene->mRootNode->FindNode(nodeAnim.NodeName.c_str());
 +        if(!node) {
-+            continue;
++            continue; // Skip if node not found
 +        }
 +        
-+        // Find the closest position, rotation and scale keyframes for the current time
-+        // and interpolate between them to get the current transformation
++        // Calculate interpolated position
++        glm::vec3 position;
++        if(!nodeAnim.PositionKeys.empty()) {
++            // Find position keys to interpolate between
++            size_t nextPosIndex = 0;
++            for(size_t i = 0; i < nodeAnim.PositionKeys.size() - 1; i++) {
++                if(CurrentTime < nodeAnim.PositionKeys[i+1].Time) {
++                    nextPosIndex = i + 1;
++                    break;
++                }
++            }
++            size_t currentPosIndex = nextPosIndex > 0 ? nextPosIndex - 1 : 0;
++            
++            // Calculate interpolation factor
++            const auto& currentKey = nodeAnim.PositionKeys[currentPosIndex];
++            const auto& nextKey = nodeAnim.PositionKeys[nextPosIndex];
++            
++            double deltaTime = nextKey.Time - currentKey.Time;
++            float factor = deltaTime > 0 ? (CurrentTime - currentKey.Time) / deltaTime : 0.0f;
++            factor = glm::clamp(factor, 0.0f, 1.0f);
++            
++            // Interpolate position
++            position = glm::mix(currentKey.Position, nextKey.Position, factor);
++        }
 +        
-+        // Then update the node's transformation matrix
++        // Calculate interpolated rotation
++        glm::quat rotation;
++        if(!nodeAnim.RotationKeys.empty()) {
++            // Find rotation keys to interpolate between
++            size_t nextRotIndex = 0;
++            for(size_t i = 0; i < nodeAnim.RotationKeys.size() - 1; i++) {
++                if(CurrentTime < nodeAnim.RotationKeys[i+1].Time) {
++                    nextRotIndex = i + 1;
++                    break;
++                }
++            }
++            size_t currentRotIndex = nextRotIndex > 0 ? nextRotIndex - 1 : 0;
++            
++            // Calculate interpolation factor
++            const auto& currentKey = nodeAnim.RotationKeys[currentRotIndex];
++            const auto& nextKey = nodeAnim.RotationKeys[nextRotIndex];
++            
++            double deltaTime = nextKey.Time - currentKey.Time;
++            float factor = deltaTime > 0 ? (CurrentTime - currentKey.Time) / deltaTime : 0.0f;
++            factor = glm::clamp(factor, 0.0f, 1.0f);
++            
++            // Interpolate rotation (using SLERP)
++            rotation = glm::slerp(currentKey.Rotation, nextKey.Rotation, factor);
++        }
 +        
-+        // Implementation details omitted for brevity
-+        // This would involve finding keyframes before and after the current time
-+        // and interpolating between them using linear or other interpolation methods
++        // Calculate interpolated scale
++        glm::vec3 scale(1.0f);
++        if(!nodeAnim.ScaleKeys.empty()) {
++            // Find scale keys to interpolate between
++            size_t nextScaleIndex = 0;
++            for(size_t i = 0; i < nodeAnim.ScaleKeys.size() - 1; i++) {
++                if(CurrentTime < nodeAnim.ScaleKeys[i+1].Time) {
++                    nextScaleIndex = i + 1;
++                    break;
++                }
++            }
++            size_t currentScaleIndex = nextScaleIndex > 0 ? nextScaleIndex - 1 : 0;
++            
++            // Calculate interpolation factor
++            const auto& currentKey = nodeAnim.ScaleKeys[currentScaleIndex];
++            const auto& nextKey = nodeAnim.ScaleKeys[nextScaleIndex];
++            
++            double deltaTime = nextKey.Time - currentKey.Time;
++            float factor = deltaTime > 0 ? (CurrentTime - currentKey.Time) / deltaTime : 0.0f;
++            factor = glm::clamp(factor, 0.0f, 1.0f);
++            
++            // Interpolate scale
++            scale = glm::mix(currentKey.Scale, nextKey.Scale, factor);
++        }
++        
++        // Build transformation matrix and apply to node
++        glm::mat4 transformMat = glm::translate(glm::mat4(1.0f), position);
++        transformMat = transformMat * glm::mat4_cast(rotation);
++        transformMat = glm::scale(transformMat, scale);
++        
++        // Convert glm mat4 to aiMatrix4x4 and apply to node
++        aiMatrix4x4 aiTransform;
++        aiTransform.a1 = transformMat[0][0]; aiTransform.a2 = transformMat[0][1]; aiTransform.a3 = transformMat[0][2]; aiTransform.a4 = transformMat[0][3];
++        aiTransform.b1 = transformMat[1][0]; aiTransform.b2 = transformMat[1][1]; aiTransform.b3 = transformMat[1][2]; aiTransform.b4 = transformMat[1][3];
++        aiTransform.c1 = transformMat[2][0]; aiTransform.c2 = transformMat[2][1]; aiTransform.c3 = transformMat[2][2]; aiTransform.c4 = transformMat[2][3];
++        aiTransform.d1 = transformMat[3][0]; aiTransform.d2 = transformMat[3][1]; aiTransform.d3 = transformMat[3][2]; aiTransform.d4 = transformMat[3][3];
++        
++        node->mTransformation = aiTransform;
 +    }
 +}
-diff --git a/CMakeLists.txt b/CMakeLists.txt
-index b7c8c3f7..c4b8c3f1 100644
---- a/CMakeLists.txt
-+++ b/CMakeLists.txt
-@@ -134,6 +134,13 @@ endif()
- find_package(ZLIB REQUIRED)
- find_package(LZ4 REQUIRED)
- 
-+# Add Assimp dependency for 3D model loading
-+find_package(assimp REQUIRED)
 +
-+# Add GLM for math operations
-+find_package(glm REQUIRED)
++unsigned int Model::TextureFromFile(const char* path, const std::string& directory)
++{
++    std::string filename = std::string(path);
++    filename = directory + '/' + filename;
++    
++    unsigned int textureID;
++    glGenTextures(1, &textureID);
++    
++    int width, height, nrComponents;
++    unsigned char* data = stbi_load(filename.c_str(), &width, &height, &nrComponents, 0);
++    if(data) {
++        GLenum format;
++        if(nrComponents == 1)
++            format = GL_RED;
++        else if(nrComponents == 3)
++            format = GL_RGB;
++        else if(nrComponents == 4)
++            format = GL_RGBA;
++        
++        glBindTexture(GL_TEXTURE_2D, textureID);
++        glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
++        glGenerateMipmap(GL_TEXTURE_2D);
++        
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++        
++        stbi_image_free(data);
++    }
++    else {
++        std::cout << "Texture failed to load at path: " << path << std::endl;
++        stbi_image_free(data);
++    }
++    
++    return textureID;
++}
+diff --git a/Core/Mesh.h b/Core/Mesh.h
+new file mode 100644
+index 0000000..b6c3cad
+--- /dev/null
++++ b/Core/Mesh.h
+@@ -0,0 +1,83 @@
++#pragma once
 +
++#include <string>
++#include <vector>
++#include "glad/glad.h"
++#include "glm/glm.hpp"
 +
- target_link_libraries(${PROJECT_NAME}
-     ${SHARED_LIB_DEPS}
-     ${ZLIB_LIBRARIES}
-@@ -141,6 +148,8 @@ target_link_libraries(${PROJECT_NAME}
-     ${WITH_ARCHIVE}
-     ${WITH_SDL2}
-     ${WITH_OPENGL}
-+    ${ASSIMP_LIBRARIES}
-+    ${GLM_LIBRARIES}
- )
- 
- if(CMAKE_COMPILER_IS_GNUCC)
++struct Vertex {
++    glm::vec3 Position;
++    glm::vec3 Normal;
++    glm::vec2 TexCoords;
++};
++
++struct Texture {
++    unsigned int id;
++    std::string type;
++    std::string path;
++};
++
++class Mesh {
++public:
++    // Mesh data
++    std::vector<Vertex> vertices;
++    std::vector<unsigned int> indices;
++    std::vector<Texture> textures;
++    
++    // Constructor
++    Mesh(const std::vector<Vertex>& vertices, const std::vector<unsigned int>& indices, const std::vector<Texture>& textures)
++    : vertices(vertices), indices(indices), textures(textures)
++    {
++        SetupMesh();
++    }
++    
++    // Render the mesh
++    void Draw(class Shader &shader) 
++    {
++        // Bind appropriate textures
++        unsigned int diffuseNr = 1;
++        unsigned int specularNr = 1;
++        
++        for(unsigned int i = 0; i < textures.size(); i++)
++        {
++            // Activate proper texture unit before binding
++            glActiveTexture(GL_TEXTURE0 + i);
++            
++            // Retrieve texture number (the N in diffuse_textureN)
++            std::string number;
++            std::string name = textures[i].type;
++            if(name == "texture_diffuse")
++                number = std::to_string(diffuseNr++);
++            else if(name == "texture_specular")
++                number = std::to_string(specularNr++);
++            
++            // Set the sampler to the correct texture unit
++            shader.SetInt((name + number).c_str(), i);
++            // Bind the texture
++            glBindTexture(GL_TEXTURE_2D, textures[i].id);
++        }
++        
++        // Draw mesh
++        glBindVertexArray(VAO);
++        glDrawElements(GL_TRIANGLES, indices.size(), GL_UNSIGNED_INT, 0);
++        glBindVertexArray(0);
++        
++        // Reset to default
++        glActiveTexture(GL_TEXTURE0);
++    }
++    
++private:
++    // Render data
++    unsigned int VAO, VBO, EBO;
++    
++    // Initializes all the buffer objects/arrays
++    void SetupMesh()
++    {
++        // Create buffers/arrays
++        glGenVertexArrays(1, &VAO);
++        glGenBuffers(1, &VBO);
++        glGenBuffers(1, &EBO);
++        
++        glBindVertexArray(VAO);
++        
++        // Load data into vertex buffer
++        glBindBuffer(GL_ARRAY_BUFFER, VBO);
++        glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), &vertices[0], GL_STATIC_DRAW);
++        
++        // Load data into element buffer
++        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
++        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), &indices[0], GL_STATIC_DRAW);
++        
++        // Set the vertex attribute pointers
++        // Positions
++        glEnableVertexAttribArray(0);
++        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0);
++        // Normals
++        glEnableVertexAttribArray(1);
++        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Normal));
++        // Texture coords
++        glEnableVertexAttribArray(2);
++        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, TexCoords));
++        
++        glBindVertexArray(0);
++    }
++};
+diff --git a/Core/Camera.h b/Core/Camera.h
+new file mode 100644
+index 0000000..be00850
+--- /dev/null
++++ b/Core/Camera.h
+@@ -0,0 +1,37 @@
++#pragma once
++
++#include "glm/glm.hpp"
++#include "glm/gtc/matrix_transform.hpp"
++
++class Camera
++{
++public:
++    // Camera attributes
++    glm::vec3 Position;
++    glm::vec3 Front;
++    glm::vec3 Up;
++    glm::vec3 Right;
++    glm::vec3 WorldUp;
++    
++    // Constructor with vectors
++    Camera(glm::vec3 position = glm::vec3(0.0f, 0.0f, 0.0f), 
++           glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f), 
++           glm::vec3 front = glm::vec3(0.0f, 0.0f, -1.0f))
++    : Position(position), WorldUp(up), Front(front)
++    {
++        UpdateCameraVectors();
++    }
++    
++    // Returns the view matrix calculated using Euler Angles and the LookAt Matrix
++    glm::mat4 GetViewMatrix() const
++    {
++        return glm::lookAt(Position, Position + Front, Up);
++    }
++    
++private:
++    // Calculates the front vector from the Camera's (updated) Euler Angles
++    void UpdateCameraVectors()
++    {
++        // Calculate the new Front vector
++        Front = glm::normalize(Front);
++        // Also re-calculate the Right and Up vector
++        Right = glm::normalize(glm::cross(Front, WorldUp));
++        Up = glm::normalize(glm::cross(Right, Front));
++    }
++};
+diff --git a/Core/Shader.h b/Core/Shader.h
+new file mode 100644
+index 0000000..5cfd4a0
+--- /dev/null
++++ b/Core/Shader.h
+@@ -0,0 +1,116 @@
++#pragma once
++
++#include <string>
++#include "glad/glad.h"
++#include "glm/glm.hpp"
++#include "glm/gtc/type_ptr.hpp"
++#include <iostream>
++
++class Shader
++{
++public:
++    // Program ID
++    unsigned int ID;
++    
++    // Constructor
++    Shader() : ID(0) {}
++    
++    // Compile the shader from source code
++    void Compile(const char* vShaderCode, const char* fShaderCode)
++    {
++        unsigned int vertex, fragment;
++        
++        // Vertex Shader
++        vertex = glCreateShader(GL_VERTEX_SHADER);
++        glShaderSource(vertex, 1, &vShaderCode, NULL);
++        glCompileShader(vertex);
++        CheckCompileErrors(vertex, "VERTEX");
++        
++        // Fragment Shader
++        fragment = glCreateShader(GL_FRAGMENT_SHADER);
++        glShaderSource(fragment, 1, &fShaderCode, NULL);
++        glCompileShader(fragment);
++        CheckCompileErrors(fragment, "FRAGMENT");
++        
++        // Shader Program
++        ID = glCreateProgram();
++        glAttachShader(ID, vertex);
++        glAttachShader(ID, fragment);
++        glLinkProgram(ID);
++        CheckCompileErrors(ID, "PROGRAM");
++        
++        // Delete the shaders as they're linked into our program now and no longer necessary
++        glDeleteShader(vertex);
++        glDeleteShader(fragment);
++    }
++    
++    // Activate the shader
++    void Use()
++    {
++        glUseProgram(ID);
++    }
++    
++    // Utility uniform functions
++    void SetBool(const std::string &name, bool value) const
++    {
++        glUniform1i(glGetUniformLocation(ID, name.c_str()), (int)value);
++    }
++    
++    void SetInt(const std::string &name, int value) const
++    {
++        glUniform1i(glGetUniformLocation(ID, name.c_str()), value);
++    }
++    
++    void SetFloat(const std::string &name, float value) const
++    {
++        glUniform1f(glGetUniformLocation(ID, name.c_str()), value);
++    }
++    
++    void SetVector3(const std::string &name, const glm::vec3 &value) const
++    {
++        glUniform3fv(glGetUniformLocation(ID, name.c_str()), 1, glm::value_ptr(value));
++    }
++    
++    void SetMatrix4(const std::string &name, const glm::mat4 &mat) const
++    {
++        glUniformMatrix4fv(glGetUniformLocation(ID, name.c_str()), 1, GL_FALSE, glm::value_ptr(mat));
++    }
++    
++private:
++    // Utility function for checking shader compilation/linking errors
++    void CheckCompileErrors(unsigned int shader, const std::string &type)
++    {
++        int success;
++        char infoLog[1024];
++        if(type != "PROGRAM")
++        {
++            glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
++            if(!success)
++            {
++                glGetShaderInfoLog(shader, 1024, NULL, infoLog);
++                std::cout << "ERROR::SHADER_COMPILATION_ERROR of type: " << type << "\n" << infoLog << "\n -- --------------------------------------------------- -- " << std::endl;
++            }
++        }
++        else
++        {
++            glGetProgramiv(shader, GL_LINK_STATUS, &success);
++            if(!success)
++            {
++                glGetProgramInfoLog(shader, 1024, NULL, infoLog);
++                std::cout << "ERROR::PROGRAM_LINKING_ERROR of type: " << type << "\n" << infoLog << "\n -- --------------------------------------------------- -- " << std::endl;
++            }
++
