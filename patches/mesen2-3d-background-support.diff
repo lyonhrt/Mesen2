@@ -1,0 +1,1056 @@
+diff --git a/Core/HdPackData.h b/Core/HdPackData.h
+index a7b2c3f7..d4b8c3f1 100644
+--- a/Core/HdPackData.h
++++ b/Core/HdPackData.h
+@@ -5,6 +5,7 @@
+ #include <unordered_map>
+ #include <string>
+ #include <vector>
++#include <optional>
+ 
+ struct HdPackCondition
+ {
+@@ -59,6 +60,34 @@ struct HdPackTileInfo
+ 	int30_t ChrBankId;
+ };
+ 
++enum class AnimationMode {
++    Loop,
++    Once
++};
++
++struct Vector3 {
++    float x = 0.0f;
++    float y = 0.0f;
++    float z = 0.0f;
++};
++
++struct HdPack3DBackground {
++    std::string ModelPath;
++    float ScrollRatio = 1.0f;
++    Vector3 Position;
++    Vector3 Scale = {1.0f, 1.0f, 1.0f};
++    
++    // Optional parameters
++    std::optional<std::string> LightingPreset;
++    std::optional<std::string> AnimationName;
++    std::optional<float> AnimationSpeed;
++    std::optional<AnimationMode> AnimationMode;
++    
++    // Conditions for when to apply this background
++    std::vector<HdPackCondition> Conditions;
++};
++
++
+ struct HdPackData
+ {
+ 	std::vector<HdPackCondition> Conditions;
+@@ -67,10 +96,14 @@ struct HdPackData
+ 	std::vector<HdPackTileInfo> Tiles;
+ 	std::unordered_map<uint32_t, std::vector<HdPackTileInfo*>> TileByKey;
+ 	std::vector<uint32_t> BackgroundsByPpuBackgroundIndex;
++	std::vector<HdPack3DBackground> Backgrounds3D;
+ 
+ 	bool HasOverscanConfig = false;
+ 	OverscanDimensions Overscan;
+ 
++	// Flag indicating 3D background support
++	bool SupportFor3DBackgrounds = false;
++
+ 	HdPackData() { }
+ 	~HdPackData() { }
+ };
+diff --git a/Core/HDPackLoader.cpp b/Core/HDPackLoader.cpp
+index b7c8c3f7..c4b8c3f1 100644
+--- a/Core/HDPackLoader.cpp
++++ b/Core/HDPackLoader.cpp
+@@ -11,6 +11,9 @@ void HDPackLoader::LoadHdPack(const std::string& filename, HdPackData& hdData)
+     // Existing code...
+     
+     std::regex backgroundRegex("\\[(.+)\\]<background>(.+)$");
++    std::regex background3dRegex("\\[(.+)\\]<3dbackground>(.+)$");
++    std::regex background3dLightingRegex("\\[(.+)\\]<3dbackground_lighting>(.+)$");
++    std::regex background3dAnimationRegex("\\[(.+)\\]<3dbackground_animation>(.+)$");
+     std::regex tileRegex("\\[(.+)\\]<tile>(.+)$");
+     
+     std::string line;
+@@ -18,6 +21,9 @@ void HDPackLoader::LoadHdPack(const std::string& filename, HdPackData& hdData)
+         if(line.rfind("<ver>", 0) == 0) {
+             int version = std::stoi(line.substr(5));
+             // Process version info
++            if(version >= 109) {
++                hdData.SupportFor3DBackgrounds = true;
++            }
+         }
+         
+         // Existing regex matches processing...
+@@ -27,6 +33,24 @@ void HDPackLoader::LoadHdPack(const std::string& filename, HdPackData& hdData)
+             std::string params = match[2].str();
+             ProcessBackground(conditionName, params, hdData);
+         }
++        else if(std::regex_search(line, match, background3dRegex) && match.size() > 2) {
++            std::string conditionName = match[1].str();
++            std::string params = match[2].str();
++            Process3DBackground(conditionName, params, hdData);
++        }
++        else if(std::regex_search(line, match, background3dLightingRegex) && match.size() > 2) {
++            std::string conditionName = match[1].str();
++            std::string lightingPreset = match[2].str();
++            Process3DBackgroundLighting(conditionName, lightingPreset, hdData);
++        }
++        else if(std::regex_search(line, match, background3dAnimationRegex) && match.size() > 2) {
++            std::string conditionName = match[1].str();
++            std::string animParams = match[2].str();
++            Process3DBackgroundAnimation(conditionName, animParams, hdData);
++        }
++        
++        // Process existing HD pack elements...
++        // (Rest of the existing code)
+     }
+ }
+ 
+@@ -39,6 +63,106 @@ void HDPackLoader::ProcessBackground(const std::string& conditionName,
+     // Existing background processing code
+ }
+ 
++void HDPackLoader::Process3DBackground(const std::string& conditionName, 
++                                     const std::string& params, 
++                                     HdPackData& hdData)
++{
++    // Split the parameters by comma
++    std::vector<std::string> paramList;
++    std::stringstream ss(params);
++    std::string item;
++    while(std::getline(ss, item, ',')) {
++        paramList.push_back(item);
++    }
++    
++    if(paramList.size() < 1) {
++        return; // Need at least the model path
++    }
++    
++    HdPack3DBackground bg;
++    bg.ModelPath = paramList[0];
++    
++    // Parse scroll ratio - matching the existing 2D background format
++    if(paramList.size() >= 2) {
++        bg.ScrollRatio = std::stof(paramList[1]);
++    } else {
++        bg.ScrollRatio = 1.0f; // Default: scroll at same speed as foreground
++    }
++    
++    // Parse position if provided
++    if(paramList.size() >= 5) {
++        bg.Position.x = std::stof(paramList[2]);
++        bg.Position.y = std::stof(paramList[3]);
++        bg.Position.z = std::stof(paramList[4]);
++    } else {
++        // Default position
++        bg.Position.x = 0.0f;
++        bg.Position.y = 0.0f;
++        bg.Position.z = -10.0f;
++    }
++    
++    // Apply condition
++    if(!conditionName.empty()) {
++        for(const auto& cond : hdData.Conditions) {
++            if(cond.Name == conditionName) {
++                bg.Conditions.push_back(cond);
++                break;
++            }
++        }
++    }
++    
++    hdData.Backgrounds3D.push_back(bg);
++}
++
++void HDPackLoader::Process3DBackgroundLighting(const std::string& conditionName, 
++                                            const std::string& lightingPreset, 
++                                            HdPackData& hdData)
++{
++    // Find the last added background with matching condition
++    for(auto it = hdData.Backgrounds3D.rbegin(); it != hdData.Backgrounds3D.rend(); ++it) {
++        if(!it->Conditions.empty() && !conditionName.empty() && 
++           it->Conditions[0].Name == conditionName) {
++            it->LightingPreset = lightingPreset;
++            return;
++        }
++    }
++}
++
++void HDPackLoader::Process3DBackgroundAnimation(const std::string& conditionName, 
++                                             const std::string& animParams, 
++                                             HdPackData& hdData)
++{
++    // Split the animation parameters
++    std::vector<std::string> paramList;
++    std::stringstream ss(animParams);
++    std::string item;
++    while(std::getline(ss, item, ',')) {
++        paramList.push_back(item);
++    }
++    
++    if(paramList.size() < 1) {
++        return; // Need at least the animation name
++    }
++    
++    // Find the last added background with matching condition
++    for(auto it = hdData.Backgrounds3D.rbegin(); it != hdData.Backgrounds3D.rend(); ++it) {
++        if(!it->Conditions.empty() && !conditionName.empty() && 
++           it->Conditions[0].Name == conditionName) {
++            it->AnimationName = paramList[0];
++            
++            // Parse animation speed if provided
++            if(paramList.size() >= 2) {
++                it->AnimationSpeed = std::stof(paramList[1]);
++            } else {
++                it->AnimationSpeed = 1.0f;
++            }
++            
++            // Parse animation mode if provided
++            if(paramList.size() >= 3) {
++                it->AnimationMode = (paramList[2] == "loop") ? 
++                                   AnimationMode::Loop : AnimationMode::Once;
++            } else {
++                it->AnimationMode = AnimationMode::Loop;
++            }
++            
++            return;
++        }
++    }
++}
+diff --git a/Core/HDPackLoader.h b/Core/HDPackLoader.h
+index b7c8c3f7..c4b8c3f1 100644
+--- a/Core/HDPackLoader.h
++++ b/Core/HDPackLoader.h
+@@ -11,6 +11,12 @@ public:
+ private:
+     void ProcessBackground(const std::string& conditionName,
+                           const std::string& params, HdPackData& hdData);
++    void Process3DBackground(const std::string& conditionName,
++                          const std::string& params, HdPackData& hdData);
++    void Process3DBackgroundLighting(const std::string& conditionName,
++                                  const std::string& lightingPreset, HdPackData& hdData);
++    void Process3DBackgroundAnimation(const std::string& conditionName,
++                                   const std::string& animParams, HdPackData& hdData);
+     
+     // Other private methods...
+ };
+diff --git a/Core/Renderer.cpp b/Core/Renderer.cpp
+index b7c8c3f7..c4b8c3f1 100644
+--- a/Core/Renderer.cpp
++++ b/Core/Renderer.cpp
+@@ -1,5 +1,6 @@
+ #include "Renderer.h"
+ #include "EmulationState.h"
++#include "HDPack3DRenderer.h"
+ 
+ Renderer::Renderer()
+ {
+@@ -7,6 +8,8 @@ Renderer::Renderer()
+     InitShaders();
+     // Other initialization
+     lastFrame = 0;
++    
++    hdPack3DRenderer = std::make_unique<HDPack3DRenderer>();
+ }
+ 
+ void Renderer::RenderFrame(EmulationState& state)
+@@ -17,6 +20,17 @@ void Renderer::RenderFrame(EmulationState& state)
+     float deltaTime = currentFrame - lastFrame;
+     lastFrame = currentFrame;
+     
++    // Render 3D backgrounds if enabled
++    if(hdPackData.SupportFor3DBackgrounds && !hdPackData.Backgrounds3D.empty()) {
++        // Enable depth testing for 3D rendering
++        glEnable(GL_DEPTH_TEST);
++        
++        // Render 3D backgrounds
++        hdPack3DRenderer->RenderBackgrounds(hdPackData.Backgrounds3D, state, deltaTime);
++        
++        // Disable depth testing for 2D rendering
++        glDisable(GL_DEPTH_TEST);
++    }
++    
+     // Render 2D backgrounds (existing code)
+     RenderBackgrounds(state);
+     
+diff --git a/Core/Renderer.h b/Core/Renderer.h
+index b7c8c3f7..c4b8c3f1 100644
+--- a/Core/Renderer.h
++++ b/Core/Renderer.h
+@@ -1,8 +1,10 @@
+ #pragma once
+ 
+ #include <memory>
++#include "HdPackData.h"
+ 
+ class EmulationState;
++class HDPack3DRenderer;
+ 
+ class Renderer
+ {
+@@ -13,6 +15,7 @@ public:
+     void RenderFrame(EmulationState& state);
+     
+     // Other public methods...
++    void SetHdPackData(const HdPackData& data) { hdPackData = data; }
+ 
+ private:
+     void InitShaders();
+@@ -21,5 +24,7 @@ private:
+     // Other private methods and members...
+     
+     float lastFrame;
++    HdPackData hdPackData;
++    std::unique_ptr<HDPack3DRenderer> hdPack3DRenderer;
+ };
+ 
+diff --git a/Core/HDPack3DRenderer.h b/Core/HDPack3DRenderer.h
+new file mode 100644
+index 0000000..8c9cb7d
+--- /dev/null
++++ b/Core/HDPack3DRenderer.h
+@@ -0,0 +1,46 @@
++#pragma once
++
++#include <vector>
++#include <unordered_map>
++#include <memory>
++#include <string>
++#include "HdPackData.h"
++#include "Shader.h"
++#include "Camera.h"
++#include "Model.h"
++
++class EmulationState;
++
++class HDPack3DRenderer
++{
++public:
++    HDPack3DRenderer();
++    
++    void RenderBackgrounds(const std::vector<HdPack3DBackground>& backgrounds, 
++                          const EmulationState& state, float deltaTime);
++    
++private:
++    void InitShaders();
++    void InitCamera();
++    bool IsBackgroundActive(const HdPack3DBackground& bg, const EmulationState& state);
++    void UpdateCamera(const EmulationState& state);
++    void RenderBackground(const HdPack3DBackground& bg, 
++                         const EmulationState& state, 
++                         float deltaTime);
++    void SetupLighting(const HdPack3DBackground& bg);
++    void HandleAnimations(const HdPack3DBackground& bg, Model& model, float deltaTime);
++    
++    bool EvaluateCondition(const HdPackCondition& condition, const EmulationState& state);
++    
++    // Cache of loaded models to avoid reloading the same model multiple times
++    std::unordered_map<std::string, std::unique_ptr<Model>> modelCache;
++    
++    // Shader for rendering 3D backgrounds
++    Shader defaultShader;
++    
++    // Camera for rendering
++    Camera camera;
++    
++    // Screen dimensions
++    int screenWidth = 256 * 4; // Default NES resolution * scale
++    int screenHeight = 240 * 4;
++};
+diff --git a/Core/HDPack3DRenderer.cpp b/Core/HDPack3DRenderer.cpp
+new file mode 100644
+index 0000000..dd9e0d3
+--- /dev/null
++++ b/Core/HDPack3DRenderer.cpp
+@@ -0,0 +1,280 @@
++#include "HDPack3DRenderer.h"
++#include "EmulationState.h"
++#include "glad/glad.h"
++#include "glm/glm.hpp"
++#include "glm/gtc/matrix_transform.hpp"
++#include "glm/gtc/type_ptr.hpp"
++
++HDPack3DRenderer::HDPack3DRenderer()
++{
++    InitShaders();
++    InitCamera();
++}
++
++void HDPack3DRenderer::RenderBackgrounds(const std::vector<HdPack3DBackground>& backgrounds, 
++                                        const EmulationState& state, float deltaTime)
++{
++    // Update camera position based on game scroll position
++    UpdateCamera(state);
++    
++    // Render each active background
++    for(const auto& bg : backgrounds) {
++        if(IsBackgroundActive(bg, state)) {
++            RenderBackground(bg, state, deltaTime);
++        }
++    }
++}
++
++void HDPack3DRenderer::InitShaders()
++{
++    // Initialize default shader for 3D background rendering
++    const char* vertexShaderSource = R"(
++        #version 330 core
++        layout (location = 0) in vec3 aPos;
++        layout (location = 1) in vec3 aNormal;
++        layout (location = 2) in vec2 aTexCoord;
++        
++        out vec3 FragPos;
++        out vec3 Normal;
++        out vec2 TexCoord;
++        
++        uniform mat4 model;
++        uniform mat4 view;
++        uniform mat4 projection;
++        
++        void main() {
++            FragPos = vec3(model * vec4(aPos, 1.0));
++            Normal = mat3(transpose(inverse(model))) * aNormal;
++            TexCoord = aTexCoord;
++            
++            gl_Position = projection * view * model * vec4(aPos, 1.0);
++        }
++    )";
++    
++    const char* fragmentShaderSource = R"(
++        #version 330 core
++        out vec4 FragColor;
++        
++        in vec3 FragPos;
++        in vec3 Normal;
++        in vec2 TexCoord;
++        
++        uniform sampler2D texture_diffuse1;
++        
++        uniform bool useAdditionalLighting;
++        uniform vec3 ambientColor;
++        uniform float ambientIntensity;
++        
++        // For preset lighting
++        uniform vec3 lightPos;
++        uniform vec3 lightColor;
++        uniform float lightIntensity;
++        
++        void main() {
++            vec4 texColor = texture(texture_diffuse1, TexCoord);
++            
++            if(!useAdditionalLighting) {
++                // Use baked lighting from the texture
++                FragColor = texColor;
++            } 
++            else {
++                // Normal lighting calculation
++                vec3 norm = normalize(Normal);
++                vec3 lightDir = normalize(lightPos - FragPos);
++                
++                // Ambient
++                vec3 ambient = ambientColor * ambientIntensity;
++                
++                // Diffuse
++                float diff = max(dot(norm, lightDir), 0.0);
++                vec3 diffuse = lightColor * diff * lightIntensity;
++                
++                // Final color
++                vec3 result = (ambient + diffuse) * texColor.rgb;
++                
++                FragColor = vec4(result, texColor.a);
++            }
++        }
++    )";
++    
++    // Compile and link shaders
++    defaultShader.Compile(vertexShaderSource, fragmentShaderSource);
++}
++
++void HDPack3DRenderer::InitCamera()
++{
++    // Initialize the camera used for rendering 3D backgrounds
++    camera.Position = glm::vec3(0.0f, 0.0f, 0.0f);
++    camera.Front = glm::vec3(0.0f, 0.0f, -1.0f);
++    camera.Up = glm::vec3(0.0f, 1.0f, 0.0f);
++}
++
++bool HDPack3DRenderer::IsBackgroundActive(const HdPack3DBackground& bg, const EmulationState& state)
++{
++    // Check if any conditions are met for this background
++    if(bg.Conditions.empty()) {
++        return true; // No conditions = always active
++    }
++    
++    for(const auto& condition : bg.Conditions) {
++        if(EvaluateCondition(condition, state)) {
++            return true;
++        }
++    }
++    
++    return false;
++}
++
++bool HDPack3DRenderer::EvaluateCondition(const HdPackCondition& condition, const EmulationState& state)
++{
++    // Implementation to evaluate conditions based on game state
++    // This would match the existing condition evaluation logic used for 2D backgrounds
++    
++    // Placeholder implementation
++    uint32_t memoryValue = state.GetMemoryValue(condition.MemoryAddress);
++    
++    switch(condition.ComparisonType) {
++        case HdPackConditionComparisonType::Equal:
++            return memoryValue == condition.ValueToCompare;
++        case HdPackConditionComparisonType::NotEqual:
++            return memoryValue != condition.ValueToCompare;
++        case HdPackConditionComparisonType::LessThan:
++            return memoryValue < condition.ValueToCompare;
++        case HdPackConditionComparisonType::GreaterThan:
++            return memoryValue > condition.ValueToCompare;
++        case HdPackConditionComparisonType::LessThanOrEqual:
++            return memoryValue <= condition.ValueToCompare;
++        case HdPackConditionComparisonType::GreaterThanOrEqual:
++            return memoryValue >= condition.ValueToCompare;
++    }
++    
++    return false;
++}
++
++void HDPack3DRenderer::UpdateCamera(const EmulationState& state)
++{
++    // Update camera position based on game scroll position
++    float scrollX = state.GetScrollX();
++    float scrollY = state.GetScrollY();
++    
++    camera.Position.x = scrollX * 0.01f; // Scale factor to convert from game units
++    camera.Position.y = scrollY * 0.01f;
++}
++
++void HDPack3DRenderer::RenderBackground(const HdPack3DBackground& bg, 
++                                       const EmulationState& state, 
++                                       float deltaTime)
++{
++    // Load the model if not already loaded
++    if(!modelCache.contains(bg.ModelPath)) {
++        modelCache[bg.ModelPath] = std::make_unique<Model>(bg.ModelPath);
++    }
++    
++    Model& model = *modelCache[bg.ModelPath];
++    
++    // Set up projection and view matrices
++    glm::mat4 projection = glm::perspective(glm::radians(45.0f), 
++                                           (float)screenWidth / (float)screenHeight, 
++                                           0.1f, 100.0f);
++    glm::mat4 view = camera.GetViewMatrix();
++    
++    // Set up model matrix based on background properties
++    glm::mat4 modelMatrix = glm::mat4(1.0f);
++    
++    // Apply game scroll position based on scroll ratio
++    float scrollX = state.GetScrollX() * bg.ScrollRatio;
++    float scrollY = state.GetScrollY() * bg.ScrollRatio;
++    
++    // Position the model
++    modelMatrix = glm::translate(modelMatrix, 
++                                glm::vec3(bg.Position.x - scrollX * 0.01f, 
++                                        bg.Position.y - scrollY * 0.01f, 
++                                        bg.Position.z));
++    
++    // Scale the model
++    modelMatrix = glm::scale(modelMatrix, 
++                            glm::vec3(bg.Scale.x, bg.Scale.y, bg.Scale.z));
++    
++    // Set up shader parameters
++    defaultShader.Use();
++    defaultShader.SetMatrix4("projection", projection);
++    defaultShader.SetMatrix4("view", view);
++    defaultShader.SetMatrix4("model", modelMatrix);
++    
++    // Configure lighting
++    SetupLighting(bg);
++    
++    // Handle animations
++    HandleAnimations(bg, model, deltaTime);
++    
++    // Render the model
++    model.Draw(defaultShader);
++}
++
++void HDPack3DRenderer::SetupLighting(const HdPack3DBackground& bg)
++{
++    bool useAdditionalLighting = bg.LightingPreset.has_value();
++    defaultShader.SetBool("useAdditionalLighting", useAdditionalLighting);
++    
++    // If not using additional lighting, the shader will just use the texture as-is
++    if(!useAdditionalLighting) {
++        return;
++    }
++    
++    // Set default ambient values
++    glm::vec3 ambientColor(0.5f, 0.5f, 0.6f);
++    float ambientIntensity = 0.5f;
++    
++    // Configure preset lighting based on the specified preset
++    glm::vec3 lightPos;
++    glm::vec3 lightColor(1.0f, 1.0f, 1.0f);
++    float lightIntensity = 1.0f;
++    
++    if(bg.LightingPreset == "top") {
++        // Top lighting preset
++        lightPos = glm::vec3(0.0f, 8.0f, 0.0f);
++        lightColor = glm::vec3(1.0f, 0.98f, 0.95f); // Slightly warm
++        lightIntensity = 1.2f;
++        ambientIntensity = 0.5f;
++    }
++    else if(bg.LightingPreset == "front") {
++        // Front lighting preset
++        lightPos = glm::vec3(0.0f, 1.0f, 8.0f);
++        lightColor = glm::vec3(1.0f, 0.9f, 0.8f); // Warmer
++        lightIntensity = 1.5f;
++        ambientIntensity = 0.3f;
++    }
++    else if(bg.LightingPreset == "bottom") {
++        // Bottom lighting preset
++        lightPos = glm::vec3(0.0f, -5.0f, 2.0f);
++        lightColor = glm::vec3(0.9f, 0.7f, 1.0f); // Slightly purple
++        lightIntensity = 1.8f;
++        ambientIntensity = 0.2f;
++    }
++    else {
++        // Custom or unrecognized preset, use default values
++        lightPos = glm::vec3(0.0f, 5.0f, 5.0f);
++    }
++    
++    // Set the lighting parameters in the shader
++    defaultShader.SetVector3("ambientColor", ambientColor);
++    defaultShader.SetFloat("ambientIntensity", ambientIntensity);
++    defaultShader.SetVector3("lightPos", lightPos);
++    defaultShader.SetVector3("lightColor", lightColor);
++    defaultShader.SetFloat("lightIntensity", lightIntensity);
++}
++
++void HDPack3DRenderer::HandleAnimations(const HdPack3DBackground& bg, Model& model, float deltaTime)
++{
++    if(!model.HasAnimations()) {
++        return; // No animations to process
++    }
++    
++    // If no specific animation is set but the model has animations, use the first one
++    if(!bg.AnimationName.has_value() && model.GetAnimationCount() > 0) {
++        model.PlayAnimation(0, 1.0f); // Default speed
++    }
++    // If animation name is specified, find and play it
++    else if(bg.AnimationName.has_value()) {
++        int animIndex = model.FindAnimation(bg.AnimationName.value());
++        if(animIndex >= 0) {
++            float speed = bg.AnimationSpeed.value_or(1.0f);
++            bool loop = !bg.AnimationMode.has_value() || 
++                       bg.AnimationMode.value() == AnimationMode::Loop;
++            
++            model.PlayAnimation(animIndex, speed, loop);
++        }
++    }
++    
++    // Update animation state
++    model.UpdateAnimations(deltaTime);
++}
+diff --git a/Core/Model.h b/Core/Model.h
+new file mode 100644
+index 0000000..2494ece
+--- /dev/null
++++ b/Core/Model.h
+@@ -0,0 +1,87 @@
++#pragma once
++
++#include <vector>
++#include <string>
++#include "Shader.h"
++#include "Mesh.h"
++#include "assimp/Importer.hpp"
++#include "assimp/scene.h"
++#include "assimp/postprocess.h"
++#include "glm/glm.hpp"
++#include "glm/gtc/quaternion.hpp"
++
++class Model 
++{
++public:
++    Model(const std::string& path);
++    
++    void Draw(Shader &shader);
++    bool HasAnimations() const;
++    int GetAnimationCount() const;
++    int FindAnimation(const std::string& name) const;
++    void PlayAnimation(int index, float speed = 1.0f, bool loop = true);
++    void UpdateAnimations(float deltaTime);
++    
++private:
++    void LoadModel(const std::string& path);
++    void ProcessNode(aiNode *node, const aiScene *scene);
++    Mesh ProcessMesh(aiMesh *mesh, const aiScene *scene);
++    void LoadAnimations(const aiScene *scene);
++
++    std::vector<Mesh> meshes;
++    std::string directory;
++    const aiScene* scene = nullptr;
++    
++    // Animation data
++    struct PositionKey {
++        double Time;
++        glm::vec3 Position;
++    };
++    
++    struct RotationKey {
++        double Time;
++        glm::quat Rotation;
++    };
++    
++    struct ScaleKey {
++        double Time;
++        glm::vec3 Scale;
++    };
++    
++    struct NodeAnimation {
++        std::string NodeName;
++        std::vector<PositionKey> PositionKeys;
++        std::vector<RotationKey> RotationKeys;
++        std::vector<ScaleKey> ScaleKeys;
++    };
++    
++    struct Animation {
++        std::string Name;
++        double Duration = 0;
++        double TicksPerSecond = 0;
++        double CurrentTime = 0;
++        
++        std::vector<NodeAnimation> NodeAnimations;
++        
++        void Reset() {
++            CurrentTime = 0;
++        }
++        
++        void Apply(const aiScene* scene);
++    };
++    
++    std::vector<Animation> animations;
++    int currentAnimation = -1;
++    float animationSpeed = 1.0f;
++    bool animationLooping = true;
++};
+diff --git a/Core/Model.cpp b/Core/Model.cpp
+new file mode 100644
+index 0000000..4f2c230
+--- /dev/null
++++ b/Core/Model.cpp
+@@ -0,0 +1,232 @@
++#include "Model.h"
++#include <iostream>
++#include "stb_image.h"
++
++Model::Model(const std::string& path)
++{
++    LoadModel(path);
++}
++
++void Model::Draw(Shader &shader)
++{
++    for(unsigned int i = 0; i < meshes.size(); i++)
++        meshes[i].Draw(shader);
++}
++
++bool Model::HasAnimations() const
++{
++    return !animations.empty();
++}
++
++int Model::GetAnimationCount() const
++{
++    return animations.size();
++}
++
++int Model::FindAnimation(const std::string& name) const
++{
++    for(int i = 0; i < animations.size(); i++) {
++        if(animations[i].Name == name) {
++            return i;
++        }
++    }
++    return -1; // Not found
++}
++
++void Model::PlayAnimation(int index, float speed, bool loop)
++{
++    if(index >= 0 && index < animations.size()) {
++        currentAnimation = index;
++        animationSpeed = speed;
++        animationLooping = loop;
++        animations[currentAnimation].Reset();
++    }
++}
++
++void Model::UpdateAnimations(float deltaTime)
++{
++    if(currentAnimation < 0 || currentAnimation >= animations.size()) {
++        return;
++    }
++    
++    Animation& animation = animations[currentAnimation];
++    
++    // Update animation time
++    animation.CurrentTime += deltaTime * animationSpeed;
++    
++    // Handle looping
++    if(animation.CurrentTime > animation.Duration) {
++        if(animationLooping) {
++            animation.CurrentTime = fmod(animation.CurrentTime, animation.Duration);
++        } else {
++            animation.CurrentTime = animation.Duration;
++            return; // Animation finished, don't update further
++        }
++    }
++    
++    // Apply the animation to the model
++    animation.Apply(scene);
++}
++
++void Model::LoadModel(const std::string& path)
++{
++    // Load model using Assimp
++    Assimp::Importer importer;
++    const aiScene* scene = importer.ReadFile(path, 
++        aiProcess_Triangulate | 
++        aiProcess_GenSmoothNormals | 
++        aiProcess_FlipUVs | 
++        aiProcess_CalcTangentSpace);
++    
++    // Check for errors
++    if(!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
++        std::cout << "ERROR::ASSIMP:: " << importer.GetErrorString() << std::endl;
++        return;
++    }
++    
++    // Store the directory path
++    this->directory = path.substr(0, path.find_last_of('/'));
++    
++    // Store the Assimp scene
++    this->scene = scene;
++    
++    // Process nodes
++    ProcessNode(scene->mRootNode, scene);
++    
++    // Load animations
++    LoadAnimations(scene);
++}
++
++void Model::ProcessNode(aiNode *node, const aiScene *scene)
++{
++    // Process meshes in this node
++    for(unsigned int i = 0; i < node->mNumMeshes; i++) {
++        aiMesh* mesh = scene->mMeshes[node->mMeshes[i]];
++        meshes.push_back(ProcessMesh(mesh, scene));
++    }
++    
++    // Process child nodes
++    for(unsigned int i = 0; i < node->mNumChildren; i++) {
++        ProcessNode(node->mChildren[i], scene);
++    }
++}
++
++Mesh Model::ProcessMesh(aiMesh *mesh, const aiScene *scene)
++{
++    std::vector<Vertex> vertices;
++    std::vector<unsigned int> indices;
++    std::vector<Texture> textures;
++    
++    // Process vertices
++    for(unsigned int i = 0; i < mesh->mNumVertices; i++) {
++        Vertex vertex;
++        
++        // Position
++        vertex.Position.x = mesh->mVertices[i].x;
++        vertex.Position.y = mesh->mVertices[i].y;
++        vertex.Position.z = mesh->mVertices[i].z;
++        
++        // Normal
++        if(mesh->HasNormals()) {
++            vertex.Normal.x = mesh->mNormals[i].x;
++            vertex.Normal.y = mesh->mNormals[i].y;
++            vertex.Normal.z = mesh->mNormals[i].z;
++        }
++        
++        // Texture coordinates
++        if(mesh->mTextureCoords[0]) {
++            vertex.TexCoords.x = mesh->mTextureCoords[0][i].x;
++            vertex.TexCoords.y = mesh->mTextureCoords[0][i].y;
++        } else {
++            vertex.TexCoords = glm::vec2(0.0f, 0.0f);
++        }
++        
++        vertices.push_back(vertex);
++    }
++    
++    // Process indices
++    for(unsigned int i = 0; i < mesh->mNumFaces; i++) {
++        aiFace face = mesh->mFaces[i];
++        for(unsigned int j = 0; j < face.mNumIndices; j++) {
++            indices.push_back(face.mIndices[j]);
++        }
++    }
++    
++    // Process materials/textures
++    if(mesh->mMaterialIndex >= 0) {
++        aiMaterial* material = scene->mMaterials[mesh->mMaterialIndex];
++        
++        // Diffuse maps
++        std::vector<Texture> diffuseMaps = LoadMaterialTextures(material, 
++                                                              aiTextureType_DIFFUSE, 
++                                                              "texture_diffuse");
++        textures.insert(textures.end(), diffuseMaps.begin(), diffuseMaps.end());
++        
++        // Specular maps
++        std::vector<Texture> specularMaps = LoadMaterialTextures(material, 
++                                                               aiTextureType_SPECULAR, 
++                                                               "texture_specular");
++        textures.insert(textures.end(), specularMaps.begin(), specularMaps.end());
++    }
++    
++    return Mesh(vertices, indices, textures);
++}
++
++std::vector<Texture> Model::LoadMaterialTextures(aiMaterial *mat, aiTextureType type, 
++                                               const std::string& typeName)
++{
++    std::vector<Texture> textures;
++    
++    for(unsigned int i = 0; i < mat->GetTextureCount(type); i++) {
++        aiString str;
++        mat->GetTexture(type, i, &str);
++        
++        // Check if texture was loaded before
++        bool skip = false;
++        for(unsigned int j = 0; j < textures_loaded.size(); j++) {
++            if(std::strcmp(textures_loaded[j].path.data(), str.C_Str()) == 0) {
++                textures.push_back(textures_loaded[j]);
++                skip = true;
++                break;
++            }
++        }
++        
++        if(!skip) {   // If texture hasn't been loaded already, load it
++            Texture texture;
++            texture.id = TextureFromFile(str.C_Str(), directory);
++            texture.type = typeName;
++            texture.path = str.C_Str();
++            textures.push_back(texture);
++            textures_loaded.push_back(texture); // Add to loaded textures
++        }
++    }
++    
++    return textures;
++}
++
++void Model::LoadAnimations(const aiScene *scene)
++{
++    // Load animations from the scene
++    for(unsigned int i = 0; i < scene->mNumAnimations; i++) {
++        aiAnimation* anim = scene->mAnimations[i];
++        
++        Animation animation;
++        animation.Name = anim->mName.C_Str();
++        animation.Duration = anim->mDuration;
++        animation.TicksPerSecond = anim->mTicksPerSecond;
++        
++        // Load animation channels (node animations)
++        for(unsigned int j = 0; j < anim->mNumChannels; j++) {
++            aiNodeAnim* nodeAnim = anim->mChannels[j];
++            
++            NodeAnimation nodeAnimation;
++            nodeAnimation.NodeName = nodeAnim->mNodeName.C_Str();
++            
++            // Position keyframes
++            for(unsigned int k = 0; k < nodeAnim->mNumPositionKeys; k++) {
++                aiVectorKey key = nodeAnim->mPositionKeys[k];
++                nodeAnimation.PositionKeys.push_back({
++                    key.mTime,
++                    glm::vec3(key.mValue.x, key.mValue.y, key.mValue.z)
++                });
++            }
++            
++            // Rotation keyframes
++            for(unsigned int k = 0; k < nodeAnim->mNumRotationKeys; k++) {
++                aiQuatKey key = nodeAnim->mRotationKeys[k];
++                nodeAnimation.RotationKeys.push_back({
++                    key.mTime,
++                    glm::quat(key.mValue.w, key.mValue.x, key.mValue.y, key.mValue.z)
++                });
++            }
++            
++            // Scale keyframes
++            for(unsigned int k = 0; k < nodeAnim->mNumScalingKeys; k++) {
++                aiVectorKey key = nodeAnim->mScalingKeys[k];
++                nodeAnimation.ScaleKeys.push_back({
++                    key.mTime,
++                    glm::vec3(key.mValue.x, key.mValue.y, key.mValue.z)
++                });
++            }
++            
++            animation.NodeAnimations.push_back(nodeAnimation);
++        }
++        
++        animations.push_back(animation);
++    }
++}
++
++void Model::Animation::Apply(const aiScene* scene)
++{
++    // Implementation to apply animation transforms to nodes
++    // This would update the transformation matrices of each affected node
++    // based on the keyframe data for the current animation time
++    
++    // For each node animation
++    for(const auto& nodeAnim : NodeAnimations) {
++        // Find the node in the scene
++        aiNode* node = scene->mRootNode->FindNode(nodeAnim.NodeName.c_str());
++        if(!node) {
++            continue;
++        }
++        
++        // Find the closest position, rotation and scale keyframes for the current time
++        // and interpolate between them to get the current transformation
++        
++        // Then update the node's transformation matrix
++        
++        // Implementation details omitted for brevity
++        // This would involve finding keyframes before and after the current time
++        // and interpolating between them using linear or other interpolation methods
++    }
++}
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b7c8c3f7..c4b8c3f1 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -134,6 +134,13 @@ endif()
+ find_package(ZLIB REQUIRED)
+ find_package(LZ4 REQUIRED)
+ 
++# Add Assimp dependency for 3D model loading
++find_package(assimp REQUIRED)
++
++# Add GLM for math operations
++find_package(glm REQUIRED)
++
++
+ target_link_libraries(${PROJECT_NAME}
+     ${SHARED_LIB_DEPS}
+     ${ZLIB_LIBRARIES}
+@@ -141,6 +148,8 @@ target_link_libraries(${PROJECT_NAME}
+     ${WITH_ARCHIVE}
+     ${WITH_SDL2}
+     ${WITH_OPENGL}
++    ${ASSIMP_LIBRARIES}
++    ${GLM_LIBRARIES}
+ )
+ 
+ if(CMAKE_COMPILER_IS_GNUCC)
