@@ -48,6 +48,7 @@
 #include "Utilities/FolderUtilities.h"
 #include "Shared/MemoryOperationType.h"
 #include "Shared/EventType.h"
+#include "SMS/HdPacks/SmsHdPackApi.h" // Add SMS HD pack API
 
 Emulator::Emulator() :
 	_settings(new EmuSettings(this)),
@@ -276,6 +277,9 @@ void Emulator::Stop(bool sendNotification, bool preventRecentGameSave, bool save
 	_stopFlag = true;
 
 	_notificationManager->SendNotification(ConsoleNotificationType::BeforeGameUnload);
+
+	// Auto-save SMS HD pack dumping when game is unloaded
+	SmsHdPackApi::SaveOnPowerOff(this);
 
 	ResetDebugger();
 
@@ -519,6 +523,12 @@ bool Emulator::InternalLoadRom(VirtualFile romFile, VirtualFile patchFile, bool 
 	
 	GameLoadedEventParams params = { needPause, forPowerCycle };
 	_notificationManager->SendNotification(ConsoleNotificationType::GameLoaded, &params);
+	
+	// Auto-start SMS HD pack dumping for SMS games
+	if(!forPowerCycle) {  // Only start on initial load, not on power cycle
+		SmsHdPackApi::AutoStartOnGameLoaded(this);
+	}
+	
 	_threadPaused = false;
 
 	if(!forPowerCycle && !_audioPlayerHud) {

@@ -1,9 +1,10 @@
-#include "pch.h"
+﻿#include "pch.h"
 #include "SMS/SmsVdp.h"
 #include "SMS/SmsConsole.h"
 #include "SMS/SmsCpu.h"
 #include "SMS/SmsControlManager.h"
 #include "SMS/SmsMemoryManager.h"
+#include "SMS/HdPacks/SmsHdPackApi.h"
 #include "Shared/Video/VideoDecoder.h"
 #include "Shared/Emulator.h"
 #include "Shared/EmuSettings.h"
@@ -408,6 +409,37 @@ void SmsVdp::LoadBgTilesSms()
 			if(_disableBackground) {
 				memset(_bgShifters, 0, sizeof(_bgShifters));
 				_bgPriority = 0;
+			}
+
+			// 🎯 HD PACK INTEGRATION: Capture real SMS background tile data
+			if(!_disableBackground) {
+				// Collect the complete 32-byte SMS tile data
+				uint8_t tileData[32];
+				uint16_t baseTileAddr = _revision == SmsRevision::Sms1 ? ((_bgTileAddr & _state.BgPatternTableAddress) | (_bgTileAddr & 0x7FF)) : _bgTileAddr;
+				baseTileAddr &= ~3; // Align to tile boundary
+				
+				// Read the complete 32-byte tile (8 rows x 4 bytes per row)
+				for(int i = 0; i < 32; i++) {
+					tileData[i] = _videoRam[baseTileAddr + i];
+				}
+				
+				// Get screen coordinates (where this tile will be drawn)
+				uint8_t x = (_state.Cycle & 0xF8); // Tile column * 8
+				uint16_t y = _state.Scanline;
+				
+				// Extract palette information from the tile attributes
+				uint32_t paletteColors = 0xFF000000; // Default alpha
+				if(_bgPalette & (0xFF << (16 - _pixelsAvailable))) {
+					// High palette (sprite palette)
+					paletteColors |= 0x00FFFF00; // Yellow tint for high palette
+				} else {
+					// Low palette (background palette)  
+					paletteColors |= 0x0000FFFF; // Cyan tint for low palette
+				}
+				
+				// Call HD pack API to process this tile
+				SmsHdPackApi::ProcessSmsBackgroundTile(_emu, x, y, baseTileAddr, tileData, paletteColors, 
+													 _bgHorizontalMirror, false, (_bgPriority & (0xFF << (16 - _pixelsAvailable))) != 0);
 			}
 
 			_pixelsAvailable += 8;
@@ -820,6 +852,29 @@ void SmsVdp::LoadSpriteTilesSms()
 			//Load sprite N tile (2nd word)
 			_spriteShifters[_spriteCount].TileData[2] = ReadVram(_spriteShifters[_spriteCount].TileAddr + 2, SmsVdpMemAccess::SpriteLoadTile);
 			_spriteShifters[_spriteCount].TileData[3] = ReadVram(_spriteShifters[_spriteCount].TileAddr + 3, SmsVdpMemAccess::SpriteLoadTile);
+			
+			// 🎯 HD PACK INTEGRATION: Capture real SMS sprite tile data
+			if(!_disableSprites) {
+				// Collect the complete 32-byte SMS sprite tile data
+				uint8_t spriteTileData[32];
+				uint16_t spriteTileAddr = _spriteShifters[_spriteCount].TileAddr & ~3; // Align to tile boundary
+				
+				// Read the complete 32-byte tile (8 rows x 4 bytes per row)
+				for(int i = 0; i < 32; i++) {
+					spriteTileData[i] = _videoRam[spriteTileAddr + i];
+				}
+				
+				// Get sprite screen coordinates
+				uint32_t spriteX = _spriteShifters[_spriteCount].SpriteX;
+				uint32_t spriteY = _state.Scanline;
+				
+				// SMS sprites always use high palette (0x10-0x1F)
+				uint32_t spritePaletteColors = 0xFF00FF00; // Green tint for sprites
+				
+				// Call HD pack API to process this sprite tile
+				SmsHdPackApi::ProcessSmsSprite(_emu, spriteX, spriteY, spriteTileAddr, spriteTileData, spritePaletteColors);
+			}
+			
 			if(_state.ShiftSpritesLeft) {
 				//Shift all sprites to the left by 8 pixels
 				ShiftSprite(_spriteCount);
@@ -838,6 +893,29 @@ void SmsVdp::LoadSpriteTilesSms()
 			//Load sprite N+1 tile (2nd word)
 			_spriteShifters[_spriteCount + 1].TileData[2] = ReadVram(_spriteShifters[_spriteCount + 1].TileAddr + 2, SmsVdpMemAccess::SpriteLoadTile);
 			_spriteShifters[_spriteCount + 1].TileData[3] = ReadVram(_spriteShifters[_spriteCount + 1].TileAddr + 3, SmsVdpMemAccess::SpriteLoadTile);
+			
+			// 🎯 HD PACK INTEGRATION: Capture real SMS sprite tile data (N+1)
+			if(!_disableSprites) {
+				// Collect the complete 32-byte SMS sprite tile data
+				uint8_t spriteTileData[32];
+				uint16_t spriteTileAddr = _spriteShifters[_spriteCount + 1].TileAddr & ~3; // Align to tile boundary
+				
+				// Read the complete 32-byte tile (8 rows x 4 bytes per row)
+				for(int i = 0; i < 32; i++) {
+					spriteTileData[i] = _videoRam[spriteTileAddr + i];
+				}
+				
+				// Get sprite screen coordinates
+				uint32_t spriteX = _spriteShifters[_spriteCount + 1].SpriteX;
+				uint32_t spriteY = _state.Scanline;
+				
+				// SMS sprites always use high palette (0x10-0x1F)
+				uint32_t spritePaletteColors = 0xFF00FF00; // Green tint for sprites
+				
+				// Call HD pack API to process this sprite tile
+				SmsHdPackApi::ProcessSmsSprite(_emu, spriteX, spriteY, spriteTileAddr, spriteTileData, spritePaletteColors);
+			}
+			
 			if(_state.ShiftSpritesLeft) {
 				//Shift all sprites to the left by 8 pixels
 				ShiftSprite(_spriteCount + 1);

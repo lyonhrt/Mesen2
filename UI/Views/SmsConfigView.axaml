@@ -87,6 +87,7 @@
 							<TextBlock Text="{l:Translate lblSmsRevision}" />
 							<c:EnumComboBox SelectedItem="{Binding Config.Revision}" Width="200" />
 						</StackPanel>
+						<CheckBox IsChecked="{Binding Config.EnableHdPacks}" Content="{l:Translate chkEnableHdPacks}" />
 					</c:OptionSection>
 				</StackPanel>
 			</ScrollViewer>

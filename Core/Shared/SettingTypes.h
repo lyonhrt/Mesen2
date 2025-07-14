@@ -701,9 +701,10 @@ struct SmsConfig
 	RamState RamPowerOnState = RamState::Random;
 
 	SmsRevision Revision = SmsRevision::Compatibility;
+	bool EnableHdPacks = true;
 
 	bool AllowInvalidInput = false;
-	bool UseSgPalette = false;
+	bool UseSgPalette = true;
 	bool GgBlendFrames = true;
 	bool RemoveSpriteLimit = false;
 	bool DisableSprites = false;
@@ -1032,6 +1033,9 @@ enum class EmulatorShortcut
 	VsInsertCoin4,
 	StartRecordHdPack,
 	StopRecordHdPack,
+
+	//SMS HD Pack
+	ToggleSmsHdPack,
 
 	ShortcutCount,
 };

@@ -44,6 +44,8 @@ namespace Mesen.ViewModels
 
 			SelectedFilter = Filters.Where(x => x.FilterType == Config.FilterType && x.Scale == Config.Scale).FirstOrDefault() ?? Filters[0];
 			SelectedBankSize = BankSizes.Where(x => x.BankSize == Config.ChrRamBankSize).FirstOrDefault() ?? BankSizes[0];
+			
+			// Only show bank size for NES games, not SMS
 			IsBankSizeVisible = EmuApi.GetGameMemorySize(MemoryType.NesChrRam) > 0;
 
 			AddDisposable(this.WhenAnyValue(x => x.SelectedFilter).Subscribe(x => {
@@ -58,7 +60,7 @@ namespace Mesen.ViewModels
 			}));
 
 			AddDisposable(this.WhenAnyValue(x => x.SaveFolder).Subscribe(x => {
-				IsOpenFolderEnabled = File.Exists(SaveFolder);
+				IsOpenFolderEnabled = Directory.Exists(SaveFolder);
 				UpdateFilterDropdown();
 			}));
 		}

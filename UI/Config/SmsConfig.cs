@@ -30,6 +30,7 @@ public class SmsConfig : BaseConfig<SmsConfig>
 	[Reactive] public RamState RamPowerOnState { get; set; } = RamState.Random;
 
 	[Reactive] public SmsRevision Revision { get; set; } = SmsRevision.Compatibility;
+	[Reactive] public bool EnableHdPacks { get; set; } = true;
 
 	[Reactive] public bool UseSgPalette { get; set; } = true;
 	[Reactive] public bool GgBlendFrames { get; set; } = true;
@@ -60,6 +61,7 @@ public class SmsConfig : BaseConfig<SmsConfig>
 			GameGearRegion = GameGearRegion,
 			RamPowerOnState = RamPowerOnState,
 			Revision = Revision,
+			EnableHdPacks = EnableHdPacks,
 
 			AllowInvalidInput = this.AllowInvalidInput,
 			UseSgPalette = UseSgPalette,
@@ -97,6 +99,7 @@ public struct InteropSmsConfig
 	public ConsoleRegion GameGearRegion;
 	public RamState RamPowerOnState;
 	public SmsRevision Revision;
+	[MarshalAs(UnmanagedType.I1)] public bool EnableHdPacks;
 
 	[MarshalAs(UnmanagedType.I1)] public bool AllowInvalidInput;
 	[MarshalAs(UnmanagedType.I1)] public bool UseSgPalette;

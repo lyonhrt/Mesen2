@@ -92,13 +92,6 @@ namespace Mesen.Utilities
 				case EmulatorShortcut.ToggleRecordAudio: ToggleRecordAudio(); break;
 				case EmulatorShortcut.ToggleRecordMovie: ToggleRecordMovie(); break;
 
-				case EmulatorShortcut.TakeScreenshot: EmuApi.TakeScreenshot(); break;
-				
-				case EmulatorShortcut.InputBarcode: InputBarcode(); break;
-				case EmulatorShortcut.LoadTape: LoadTape(); break;
-				case EmulatorShortcut.RecordTape: RecordTape(); break;
-				case EmulatorShortcut.StopRecordTape: EmuApi.ProcessTapeRecorderAction(TapeRecorderAction.StopRecord); break;
-
 				case EmulatorShortcut.LoadStateFromFile: LoadStateFromFile(); break;
 				case EmulatorShortcut.SaveStateToFile: SaveStateToFile(); break;
 

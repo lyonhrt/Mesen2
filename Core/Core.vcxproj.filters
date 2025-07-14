@@ -2982,6 +2982,17 @@
     <ClInclude Include="GBA\GbaWaitStates.h">
       <Filter>GBA</Filter>
     </ClInclude>
+    <ClInclude Include="SMS\HdPacks\HdPackConditions.h" />
+    <ClInclude Include="SMS\HdPacks\HdPackLoaderSms.h" />
+    <ClInclude Include="SMS\HdPacks\HdPackBuilderSms.h" />
+    <ClInclude Include="SMS\HdPacks\HdDataSms.h" />
+    <ClInclude Include="SMS\HdPacks\HdSmsPack.h" />
+    <ClInclude Include="SMS\HdPacks\HdBuilderSmsVdp.h" />
+    <ClInclude Include="SMS\HdPacks\SmsHdPackApi.h" />
+    <ClInclude Include="Shared\HdPacks\IHdPackSystem.h" />
+    <ClInclude Include="SMS\HdPacks\SmsHdPackSystem.h" />
+    <ClInclude Include="NES\HdPacks\NesHdPackSystem.h" />
+    <ClInclude Include="SMS\HdPacks\SmsHdVideoFilter.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Shared\Video\RotateFilter.cpp">
@@ -3344,6 +3355,17 @@
     <ClCompile Include="SNES\Debugger\St018DisUtils.cpp">
       <Filter>SNES\Debugger</Filter>
     </ClCompile>
+    <ClCompile Include="SMS\HdPacks\HdDataSms.cpp" />
+    <ClCompile Include="SMS\HdPacks\HdPackLoaderSms.cpp" />
+    <ClCompile Include="SMS\HdPacks\HdPackBuilderSms.cpp" />
+    <ClCompile Include="SMS\HdPacks\HdSmsPack.cpp" />
+    <ClCompile Include="SMS\HdPacks\HdPackConditions.cpp" />
+    <ClCompile Include="SMS\HdPacks\HdBuilderSmsVdp.cpp" />
+    <ClCompile Include="SMS\HdPacks\SmsHdPackApi.cpp" />
+    <ClCompile Include="Shared\HdPacks\IHdPackSystem.cpp" />
+    <ClCompile Include="SMS\HdPacks\SmsHdPackSystem.cpp" />
+    <ClCompile Include="NES\HdPacks\NesHdPackSystem.cpp" />
+    <ClCompile Include="SMS\HdPacks\SmsHdVideoFilter.cpp" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="PCE">

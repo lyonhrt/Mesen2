@@ -141,8 +141,10 @@ namespace Mesen.Config.Shortcuts
 		StartRecordHdPack,
 		StopRecordHdPack,
 
-		LastValidValue,
-		[Obsolete] LoadRandomGame,
+		//SMS HD Pack
+		ToggleSmsHdPack,
+
+		LastValidValue = ToggleSmsHdPack,
 	}
 
 	public static class EmulatorShortcutExtensions
