@@ -951,6 +951,7 @@
     <ClCompile Include="SMS\SmsNtscFilter.cpp" />
     <ClCompile Include="SMS\SmsPsg.cpp" />
     <ClCompile Include="SMS\SmsVdp.cpp" />
+    <ClCompile Include="SMS\HdPacks\SmsHdPackApi.cpp" />
     <ClCompile Include="SNES\AluMulDiv.cpp" />
     <ClCompile Include="SNES\Coprocessors\ST018\ArmV3Cpu.cpp" />
     <ClCompile Include="SNES\Coprocessors\ST018\St018.cpp" />
