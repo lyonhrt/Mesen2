@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include "SMS/SmsVdp.h"
 #include "SMS/SmsConsole.h"
 #include "SMS/SmsCpu.h"

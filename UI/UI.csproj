@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
@@ -651,7 +651,7 @@
   </ItemGroup>
 
   <Target Name="PreBuildWindows" BeforeTargets="PreBuildEvent" Condition="'$(RuntimeIdentifier)'=='win-x64'">
-    <Exec Command="cd $(OutDir)&#xD;&#xA;rd Dependencies /s /q&#xD;&#xA;md Dependencies&#xD;&#xA;xcopy /s $(ProjectDir)Dependencies\* Dependencies&#xD;&#xA;copy libHarfBuzzSharp.dll Dependencies&#xD;&#xA;copy libSkiaSharp.dll Dependencies&#xD;&#xA;copy MesenCore.dll Dependencies&#xD;&#xA;cd Dependencies&#xD;&#xA;del ..\Dependencies.zip&#xD;&#xA;powershell Compress-Archive -Path * -DestinationPath '..\Dependencies.zip' -Force&#xD;&#xA;copy ..\Dependencies.zip $(ProjectDir)" />
+    <Exec Command="cd &quot;$(OutDir)&quot; &amp;&amp; if exist Dependencies rd Dependencies /s /q &amp;&amp; md Dependencies &amp;&amp; if exist &quot;$(ProjectDir)Dependencies&quot; xcopy /s &quot;$(ProjectDir)Dependencies\*&quot; Dependencies &amp;&amp; if exist libHarfBuzzSharp.dll copy libHarfBuzzSharp.dll Dependencies &amp;&amp; if exist libSkiaSharp.dll copy libSkiaSharp.dll Dependencies &amp;&amp; if exist MesenCore.dll copy MesenCore.dll Dependencies &amp;&amp; cd Dependencies &amp;&amp; if exist ..\Dependencies.zip del ..\Dependencies.zip &amp;&amp; powershell Compress-Archive -Path * -DestinationPath '..\Dependencies.zip' -Force &amp;&amp; copy ..\Dependencies.zip &quot;$(ProjectDir)&quot;" />
   </Target>
 
 	<Target Name="PreBuildLinux" BeforeTargets="PreBuildEvent" Condition="'$(RuntimeIdentifier)'=='linux-x64' Or '$(RuntimeIdentifier)'=='linux-arm64'">

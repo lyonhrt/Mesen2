@@ -27,6 +27,11 @@ class SmsVdp final : public ISerializable
 public:
 	static constexpr int SmsVdpLeftBorder = 8;
 
+	// Debug accessor for HD pack development
+	uint8_t DebugReadVram(uint16_t addr) const {
+		return _videoRam[addr & 0x3FFF];
+	}
+
 private:
 	Emulator* _emu = nullptr;
 	SmsConsole* _console = nullptr;
@@ -187,6 +192,10 @@ public:
 	int GetViewportYOffset();
 	const uint16_t* GetSmsSgPalette() { return _activeSgPalette; }
 	SmsVdpState& GetState() { return _state; }
+
+	// HD Pack palette access methods
+	uint8_t* GetPaletteRam() { return _paletteRam; }
+	const uint16_t* GetInternalPaletteRam() const { return _internalPaletteRam; }
 
 	void DebugWritePalette(uint8_t addr, uint8_t value);
 

@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include "SMS/HdPacks/SmsHdPackApi.h"
 #include "SMS/HdPacks/HdPackBuilderSms.h"
 #include "SMS/SmsConsole.h"
@@ -72,7 +72,7 @@ namespace SmsHdPackApi {
         
         options.SaveFolder = saveFolder;
         options.Scale = 1;
-        options.ChrRamBankSize = 0x1000;
+        options.VramBankSize = 0x1000;
         options.GroupBlankTiles = true;
         options.SortByUsageFrequency = false;
         options.IgnoreOverscan = false;
@@ -113,7 +113,7 @@ namespace SmsHdPackApi {
         // Create tile key from the SMS tile data
         HdTileKeySms tileKey = {};
         tileKey.TileIndex = tileAddr / 32;
-        tileKey.IsChrRamTile = true;
+        tileKey.IsVramTile = true;
         tileKey.PaletteColors = paletteColors;
         
         // Copy the 32-byte SMS tile data
@@ -134,7 +134,7 @@ namespace SmsHdPackApi {
         // Create tile key from the SMS sprite data
         HdTileKeySms tileKey = {};
         tileKey.TileIndex = tileAddr / 32;
-        tileKey.IsChrRamTile = true; 
+        tileKey.IsVramTile = true;
         tileKey.PaletteColors = paletteColors;
         
         // Copy the 32-byte SMS tile data
