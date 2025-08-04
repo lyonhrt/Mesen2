@@ -20,4 +20,10 @@ namespace SmsHdPackApi {
                          
     // Check if currently dumping
     bool IsCurrentlyDumping();
+
+    // Enable/disable HD tile dumping
+    void SetHdTileDumpingEnabled(bool enabled);
+
+    // Check if HD tile dumping is enabled
+    bool IsHdTileDumpingEnabled();
 }

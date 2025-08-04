@@ -702,6 +702,7 @@ struct SmsConfig
 
 	SmsRevision Revision = SmsRevision::Compatibility;
 	bool EnableHdPacks = true;
+	bool EnableHdTileDumping = false;
 
 	bool AllowInvalidInput = false;
 	bool UseSgPalette = true;

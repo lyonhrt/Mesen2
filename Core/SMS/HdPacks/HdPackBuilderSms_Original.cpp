@@ -23,7 +23,6 @@ HdPackBuilderSms::HdPackBuilderSms(Emulator* emu, SmsConsole* console, HdPackBui
     _emu = emu;
     _console = console;
     _vdp = _console->GetVdp();
-    _isVram = true;
     _options = options;
     _saveFolder = options.SaveFolder;
     
@@ -35,102 +34,162 @@ HdPackBuilderSms::HdPackBuilderSms(Emulator* emu, SmsConsole* console, HdPackBui
     InitializeHdPackData();
     UpdatePalette();
     
-    // Log initialization information
-    LogInitializationInfo();
+    if (_options.DebugMode) {
+        MessageManager::Log("[SMS HD Pack] Started for: " + _romName);
+    }
 }
 
 HdPackBuilderSms::~HdPackBuilderSms() {
-    MessageManager::Log("[SMS HD Pack] Destructor called - starting HD pack save process");
-    MessageManager::Log("[SMS HD Pack] Current tile count: " + std::to_string(_hdData.Tiles.size()));
-    MessageManager::Log("[SMS HD Pack] Save folder: " + _saveFolder);
-    
     SaveHdPack();
     
-    
-    // Generate debug information if requested
-    if(_options.DebugMode) {
-        MessageManager::Log("[SMS HD Pack] Generating debug information");
-        SaveDebugInfo();
-        if(_options.DumpTileGrid) {
-            SaveDebugTileGrid();
-        }
+    if (_options.DebugMode) {
+        MessageManager::Log("[SMS HD Pack] Saved " + std::to_string(_hdData.Tiles.size()) + " tiles");
     }
-    
-    MessageManager::Log("[SMS HD Pack] Destructor completed");
 }
 
 void HdPackBuilderSms::InitializeHdPackData() {
-    // Initialize HD pack data with SMS-specific settings
     _hdData.Scale = _options.Scale;
-    _hdData.Version = SmsHdPackConstants::DEFAULT_HD_PACK_VERSION;
-    
-    // Initialize counters and tracking data
-    _totalSpriteCount = 0;
-    _totalBgCount = 0;
-    _uniqueSpriteCount = 0;
-    _uniqueBgCount = 0;
     _tileUsageCount.clear();
     _tilesByKey.clear();
 }
 
-void HdPackBuilderSms::LogInitializationInfo() {
-    MessageManager::Log("[SMS HD Pack] Started tile dumping for: " + _romName);
-    MessageManager::Log("[SMS HD Pack] Save location: " + _saveFolder);
-    
-    // Log debug options
-    if(_options.DebugMode) {
-        MessageManager::Log("[SMS HD Pack] Debug mode enabled");
-        if(_options.UseActualPalette) {
-            MessageManager::Log("[SMS HD Pack] Using actual SMS palette colors");
-        } else {
-            MessageManager::Log("[SMS HD Pack] Using debug color scheme");
-        }
-        if(_options.ShowPaletteInfo) {
-            LogPaletteInfo();
-        }
-        if(_options.DumpTileGrid) {
-            MessageManager::Log("[SMS HD Pack] Tile grid dump will be generated");
-        }
-    }
-}
 
-// Main function to update palette data from VDP.
-// 
-// This function coordinates the entire palette update process:
-// 1. Validates VDP availability and sets defaults if needed
-// 2. Determines the console model and video mode
-// 3. Processes palette data using the appropriate format (Game Gear, SMS, or SG-1000)
-// 4. Finalizes transparency settings and debug logging
-// 
-// The function now uses a modular approach with helper functions for better
-// maintainability and clarity. Each console type and palette format is handled
-// by a focused helper function.
+
 void HdPackBuilderSms::UpdatePalette() {
-    // Validate VDP and set defaults if needed
-    if(!ValidateVdpAndSetDefaults()) {
+    if (!_vdp) {
+        // Use default palette if VDP not available
+        for (int i = 0; i < 32; i++) {
+            _smsPalette[i] = 0xFF000000 | (i * 8 << 16) | (i * 8 << 8) | (i * 8);
+        }
         return;
     }
     
-    // Get VDP state to determine video mode
+    // Get VDP state to access palette data
     SmsVdpState state = _vdp->GetState();
     
     if(state.UseMode4) {
-        // SMS Mode 4 - determine console model for palette format
+        // SMS Mode 4 - get palette from VDP internal palette RAM
         SmsModel model = _console->GetModel();
         
         if(model == SmsModel::GameGear) {
             // Game Gear uses 12-bit RGB stored in internal palette RAM
-            ProcessGameGearPalette();
+            for(int i = 0; i < 16; i++) {
+                // Background palette (entries 0-15)
+                uint16_t ggColor = _vdp->GetInternalPaletteRam()[i];
+                
+                // Extract 4-bit RGB components from 12-bit GG color
+                uint8_t r = (ggColor & 0x0F);
+                uint8_t g = ((ggColor >> 4) & 0x0F);
+                uint8_t b = ((ggColor >> 8) & 0x0F);
+                
+                // Convert 4-bit values (0-15) to 8-bit (0-255)
+                r = (r << 4) | r;
+                g = (g << 4) | g;
+                b = (b << 4) | b;
+                
+                // Store as ARGB
+                _bgPalette[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
+                
+                // Sprite palette (entries 16-31)
+                ggColor = _vdp->GetInternalPaletteRam()[16 + i];
+                
+                // Extract and convert components
+                r = (ggColor & 0x0F);
+                g = ((ggColor >> 4) & 0x0F);
+                b = ((ggColor >> 8) & 0x0F);
+                
+                r = (r << 4) | r;
+                g = (g << 4) | g;
+                b = (b << 4) | b;
+                
+                _spritePalette[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
+            }
         } else {
-            // SMS uses 6-bit RGB stored in palette RAM
-            ProcessSmsPalette();
+            // SMS uses 6-bit RGB stored in palette RAM (--BBGGRR format)
+            uint8_t* paletteRam = _vdp->GetPaletteRam();
+            if(paletteRam) {
+                for(int i = 0; i < 16; i++) {
+                    // Background palette (entries 0-15)
+                    uint8_t smsColor = paletteRam[i];
+                    
+                    // Use our enhanced color conversion function for more accurate colors
+                    _bgPalette[i] = ConvertSmsColor(smsColor);
+                    
+                    // Sprite palette (entries 16-31)
+                    smsColor = paletteRam[16 + i];
+                    
+                    // Use our enhanced color conversion function for more accurate colors
+                    _spritePalette[i] = ConvertSmsColor(smsColor);
+                    
+                    // Log palette data for debugging if enabled
+                    if(_options.DebugMode && _options.ShowPaletteInfo) {
+                        std::stringstream ss;
+                        ss << "[SMS HD Pack] Palette [" << i << "] BG=0x" 
+                           << std::hex << std::setw(2) << std::setfill('0') << (int)paletteRam[i]
+                           << " -> 0x" << std::hex << std::setw(8) << std::setfill('0') << _bgPalette[i]
+                           << ", Sprite=0x" << std::hex << std::setw(2) << std::setfill('0') << (int)paletteRam[16+i]
+                           << " -> 0x" << std::hex << std::setw(8) << std::setfill('0') << _spritePalette[i];
+                        MessageManager::Log(ss.str());
+                    }
+                }
+                
+                // Log palette data for debugging
+                if(_options.DebugMode) {
+                    for(int i = 0; i < 16; i++) {
+                        MessageManager::Log("[SMS HD Pack] BG Palette [" + std::to_string(i) + "] = 0x" + 
+                                          HexUtilities::ToHex(paletteRam[i]) + " -> 0x" + 
+                                          HexUtilities::ToHex(_bgPalette[i]));
+                    }
+                }
+            } else {
+                MessageManager::Log("[SMS HD Pack] Warning: Could not access SMS palette RAM, using defaults");
+                InitializeDefaultSmsPalette();
+                return;
+            }
         }
         
-        // Finalize transparency and logging for Mode 4
-        FinalizeTransparencyAndLogging();
+        // Always set transparent color (index 0) to fully transparent
+        _bgPalette[0] = 0x00000000;
+        _spritePalette[0] = 0x00000000;
+        
+        if(_options.DebugMode) {
+            MessageManager::Log("[SMS HD Pack] Successfully loaded VDP palette data");
+        }
     } else {
-        // SG-1000 mode - use 15-bit RGB fixed palette
-        ProcessSg1000Palette();
+        // SG-1000 mode - use fixed palette
+        const uint16_t* sgPalette = _vdp->GetSmsSgPalette();
+        if(sgPalette) {
+            for(int i = 0; i < 16; i++) {
+                // SG-1000 uses 15-bit RGB format (0BBBBBGGGGGRRRRR)
+                uint16_t rgb555 = sgPalette[i];
+                
+                // Extract 5-bit components
+                uint8_t r = rgb555 & 0x1F;
+                uint8_t g = (rgb555 >> 5) & 0x1F;
+                uint8_t b = (rgb555 >> 10) & 0x1F;
+                
+                // Convert 5-bit to 8-bit
+                r = (r << 3) | (r >> 2);
+                g = (g << 3) | (g >> 2);
+                b = (b << 3) | (b >> 2);
+                
+                // Store as ARGB
+                uint32_t color = 0xFF000000 | (r << 16) | (g << 8) | b;
+                _bgPalette[i] = color;
+                _spritePalette[i] = color; // Same palette for both
+            }
+            
+            if(_options.DebugMode) {
+                MessageManager::Log("[SMS HD Pack] Successfully loaded SG-1000 palette data");
+            }
+        } else {
+            MessageManager::Log("[SMS HD Pack] Warning: Could not access SG palette, using defaults");
+            InitializeDefaultSmsPalette();
+        }
+    }
+    
+    if(_options.DebugMode && _options.ShowPaletteInfo) {
+        LogPaletteInfo();
     }
 }
 
@@ -481,19 +540,6 @@ void HdPackBuilderSms::LogTileDebugInfo(const HdPackTileInfoSms* tile) const {
     }
 }
 
-// Main function to generate HD tile data from SMS tile data.
-// 
-// This function coordinates the entire HD tile generation process:
-// 1. Validates input and initializes the HD tile data buffer
-// 2. Reads tile data from VRAM using helper function
-// 3. Processes all pixels using modular pixel processing
-// 4. Applies debug effects and verification if enabled
-// 
-// The function now uses a modular approach with helper functions for better
-// maintainability and clarity. All tile data reading, pixel processing, and
-// debug effects are handled by focused helper functions.
-// 
-// @param tile Pointer to the tile to generate HD data for
 void HdPackBuilderSms::GenerateHdTile(HdPackTileInfoSms* tile) {
     // Validate input
     if(!tile || !_vdp) {
@@ -501,35 +547,196 @@ void HdPackBuilderSms::GenerateHdTile(HdPackTileInfoSms* tile) {
         return;
     }
     
-    if(_options.DebugMode) {
-        MessageManager::Log("[SMS HD Pack] Generating HD tile at address 0x" + 
-                           HexUtilities::ToHex(tile->TileIndex) + 
-                           ", IsSprite: " + std::string(tile->IsSprite ? "true" : "false") + 
-                           ", PaletteIndex: " + std::to_string(tile->PaletteIndex));
-    }
+    // Always log this for debugging the blank tile issue
+    MessageManager::Log("[SMS HD Pack] DEBUG: Generating HD tile at address 0x" + 
+                       HexUtilities::ToHex(tile->TileIndex) + 
+                       ", IsSprite: " + std::string(tile->IsSprite ? "true" : "false") + 
+                       ", PaletteIndex: " + std::to_string(tile->PaletteIndex));
     
-    // Initialize HD tile data buffer
     int scale = _hdData.Scale;
     int width = SmsHdPackConstants::SMS_TILE_SIZE * scale;
     int height = SmsHdPackConstants::SMS_TILE_SIZE * scale;
     
+    // Clear and resize the HD tile data buffer
     tile->HdTileData.clear();
     tile->HdTileData.resize(width * height, 0);
     
-    // Read tile data from VRAM
+    // Read the tile data directly from VRAM
+    // Each SMS tile is 32 bytes (8x8 pixels, 4bpp)
     uint8_t tileData[SmsHdPackConstants::SMS_TILE_DATA_SIZE] = {0};
-    if(!ReadTileDataFromVram(tile, tileData)) {
-        MessageManager::Log("[SMS HD Pack] ERROR: Failed to read tile data from VRAM");
-        return;
+    
+    // Calculate the actual VRAM address for this tile
+    uint16_t tileAddr = tile->TileIndex * SmsHdPackConstants::SMS_TILE_DATA_SIZE;
+    
+    // Read the tile data from VRAM
+    for(int i = 0; i < SmsHdPackConstants::SMS_TILE_DATA_SIZE; i++) {
+        tileData[i] = _vdp->DebugReadVram(tileAddr + i);
     }
     
-    // Process all pixels in the tile
-    ProcessTilePixels(tile, tileData);
+    // Store the tile data in the tile object
+    memcpy(tile->TileData, tileData, SmsHdPackConstants::SMS_TILE_DATA_SIZE);
     
-    // Apply debug effects if enabled
-    ApplyDebugEffects(tile);
+    // Log debug information - always log for debugging blank tile issue
+    std::stringstream tileDataSs;
+    tileDataSs << "[SMS HD Pack] Tile data bytes for tile 0x" << std::hex << tileAddr << ": ";
+    for(int i = 0; i < 8 && i < SmsHdPackConstants::SMS_TILE_DATA_SIZE; i++) {
+        tileDataSs << std::hex << std::setw(2) << std::setfill('0') << (int)tileData[i] << " ";
+    }
+    MessageManager::Log(tileDataSs.str());
     
-    // Verify palette usage if debugging is enabled
+    // Check if tile data is all zeros (which would result in blank tiles)
+    bool allZeros = true;
+    for(int i = 0; i < SmsHdPackConstants::SMS_TILE_DATA_SIZE; i++) {
+        if(tileData[i] != 0) {
+            allZeros = false;
+            break;
+        }
+    }
+    
+    if(allZeros) {
+        MessageManager::Log("[SMS HD Pack] WARNING: Tile data is all zeros for tile at address 0x" + 
+                           HexUtilities::ToHex(tileAddr) + ", this will result in a blank tile");
+    }
+    
+    // SMS tiles are stored in 4 bitplanes, with each row taking 4 bytes
+    // Each row has 4 bytes arranged as follows:
+    // Byte 0: Bit plane 0 for the entire row (8 pixels)
+    // Byte 1: Bit plane 1 for the entire row (8 pixels)
+    // Byte 2: Bit plane 2 for the entire row (8 pixels)
+    // Byte 3: Bit plane 3 for the entire row (8 pixels)
+    
+    // Process each pixel in the original 8x8 tile
+    for(int y = 0; y < SmsHdPackConstants::SMS_TILE_SIZE; y++) {
+        // Each row starts at y*4 in the tile data (4 bitplanes per row)
+        int rowOffset = y * SmsHdPackConstants::SMS_BITPLANES;
+        
+        // Get the 4 bytes for this row (one byte per bitplane)
+        uint8_t plane0 = tileData[rowOffset + 0];
+        uint8_t plane1 = tileData[rowOffset + 1];
+        uint8_t plane2 = tileData[rowOffset + 2];
+        uint8_t plane3 = tileData[rowOffset + 3];
+        
+        // Debug log for bitplane data
+        if(y < 2) { // Log first two rows for debugging
+            std::stringstream ss;
+            ss << "[SMS HD Pack] Tile row " << y << " bitplanes: "
+               << std::hex << std::setw(2) << std::setfill('0') << (int)plane0 << " "
+               << std::hex << std::setw(2) << std::setfill('0') << (int)plane1 << " "
+               << std::hex << std::setw(2) << std::setfill('0') << (int)plane2 << " "
+               << std::hex << std::setw(2) << std::setfill('0') << (int)plane3;
+            MessageManager::Log(ss.str());
+        }
+        
+        // Process each pixel in the current row
+        for(int x = 0; x < SmsHdPackConstants::SMS_TILE_SIZE; x++) {
+            // Extract pixel color index from bitplanes using our fixed extraction function
+            uint8_t colorIndex = ExtractPixelFromBitplanes(plane0, plane1, plane2, plane3, x);
+            
+            // Debug log for pixel data
+            if(y < 2 && x < 2) { // Log first few pixels for debugging
+                std::stringstream ss;
+                ss << "[SMS HD Pack] Pixel at (" << x << "," << y << ") has color index " 
+                   << std::dec << (int)colorIndex;
+                MessageManager::Log(ss.str());
+            }
+            
+            // Get the color from the palette
+            uint32_t color;
+            
+            // Use the actual SMS palette colors for accurate representation
+            if(colorIndex == 0) {
+                // Index 0 is typically transparent or background
+                color = 0x00000000; // Transparent (alpha = 0)
+            } else {
+                // Get the current VDP state to access the most up-to-date palette
+                SmsVdpState state = _vdp->GetState();
+                uint8_t* paletteRam = _vdp->GetPaletteRam();
+                
+                if(!paletteRam) {
+                    MessageManager::Log("[SMS HD Pack] ERROR: Cannot access palette RAM");
+                    color = 0xFFFF00FF; // Magenta (error indicator)
+                } else {
+                    // For Castle of Illusion and other SMS games, we need to use the
+                    // actual palette RAM values directly from the VDP
+                    uint8_t paletteIndex;
+                    
+                    if(tile->IsSprite) {
+                        // For sprites, use the sprite palette (second half of palette RAM)
+                        // Ensure we stay within bounds (sprite palette is indices 16-31)
+                        paletteIndex = 16 + (colorIndex % 16);
+                    } else {
+                        // For background tiles, use the background palette (first half of palette RAM)
+                        // Ensure we stay within bounds (background palette is indices 0-15)
+                        paletteIndex = colorIndex % 16;
+                    }
+                    
+                    // Get the raw SMS color value directly from palette RAM
+                    uint8_t smsColor = paletteRam[paletteIndex];
+                    
+                    // Convert the SMS color to ARGB format
+                    color = ConvertSmsColor(smsColor);
+                    
+                    // FIX: Ensure alpha channel is fully opaque for non-transparent pixels
+                    // This fixes the black tile rendering issue
+                    color = (color & 0x00FFFFFF) | 0xFF000000;
+                    
+                    // Debug log for palette color
+                    if(_options.DebugMode && _options.ShowPaletteInfo && y < 2 && x < 2) {
+                        std::stringstream ss;
+                        ss << "[SMS HD Pack] Using palette RAM index " << (int)paletteIndex 
+                           << " for color index " << (int)colorIndex
+                           << ", SMS color=0x" << std::hex << std::setw(2) << std::setfill('0') << (int)smsColor
+                           << " -> ARGB=0x" << std::hex << std::setw(8) << std::setfill('0') << color;
+                        MessageManager::Log(ss.str());
+                    }
+                }
+            }
+            
+            // Log palette usage for debugging
+            if(y < 2 && x < 2) { // Log first few pixels for debugging
+                std::stringstream ss;
+                ss << "[SMS HD Pack] Using " << (tile->IsSprite ? "sprite" : "background") 
+                   << " palette color " << std::dec << (int)colorIndex 
+                   << " = 0x" << std::hex << std::setw(8) << std::setfill('0') << color;
+                MessageManager::Log(ss.str());
+            }
+            
+            // Add debug overlay if debug mode is enabled
+            if(_options.DebugMode) {
+                // Add a subtle grid pattern to help visualize pixel boundaries
+                if(x == 0 || y == 0 || x == 7 || y == 7) {
+                    // Make edge pixels slightly darker for tile boundary visualization
+                    uint8_t r = color & 0xFF;
+                    uint8_t g = (color >> 8) & 0xFF;
+                    uint8_t b = (color >> 16) & 0xFF;
+                    
+                    // Darken by 20%
+                    r = (uint8_t)(r * 0.8f);
+                    g = (uint8_t)(g * 0.8f);
+                    b = (uint8_t)(b * 0.8f);
+                    
+                    color = 0xFF000000 | (b << 16) | (g << 8) | r;
+                }
+            }
+            
+            // Fill the scaled tile with the color
+            for(int sy = 0; sy < scale; sy++) {
+                for(int sx = 0; sx < scale; sx++) {
+                    // Calculate the correct index in the HD tile data buffer
+                    int destX = x * scale + sx;
+                    int destY = y * scale + sy;
+                    int hdIndex = destY * width + destX;
+                    
+                    // Ensure we're within bounds
+                    if(hdIndex >= 0 && hdIndex < tile->HdTileData.size()) {
+                        tile->HdTileData[hdIndex] = color;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Verify palette usage for this tile
     if(_options.DebugMode || _options.VerboseLogging) {
         uint8_t* paletteRam = _vdp->GetPaletteRam();
         if(paletteRam) {
@@ -537,9 +744,13 @@ void HdPackBuilderSms::GenerateHdTile(HdPackTileInfoSms* tile) {
         }
     }
     
-    if(_options.DebugMode) {
-        MessageManager::Log("[SMS HD Pack] Tile generation completed for tile at address 0x" + 
-                           HexUtilities::ToHex(tile->TileIndex));
+    // Log completion
+    MessageManager::Log("[SMS HD Pack] Tile generation completed for tile at address 0x" + 
+                       HexUtilities::ToHex(tile->TileIndex));
+    
+    // Apply debug overlay if enabled
+    if(_options.HighlightSprites) {
+        GenerateDebugOverlay(tile, tile->IsSprite);
     }
 }
 
@@ -1617,246 +1828,343 @@ void HdPackBuilderSms::DrawTile(HdPackTileInfoSms* tile, int tileNumber, uint32_
             
             if(srcIndex < tile->HdTileData.size() && 
                dstIndex >= 0 && 
-               dstIndex < pngWidth * pngWidth) {
+               dstIndex < pngWidth * (pngWidth / tilesPerRow * tileSize)) {
                 pngBuffer[dstIndex] = tile->HdTileData[srcIndex];
             }
         }
     }
 }
 
-/**
- * Filters input tiles to remove empty/invalid tiles and eliminate visual duplicates.
- * 
- * This function performs two main operations:
- * 1. Filters out tiles that are empty, mostly transparent, or have insufficient content
- * 2. Removes visually identical tiles using RGB-based hashing to prevent duplicates
- * 
- * @param inputTiles Vector of tile pointers to filter
- * @param isSprite Whether these are sprite tiles (affects filtering criteria)
- * @return Vector of valid, unique tiles ready for sheet creation
- */
-vector<HdPackTileInfoSms*> HdPackBuilderSms::FilterValidTiles(const vector<HdPackTileInfoSms*>& inputTiles, bool isSprite)
+void HdPackBuilderSms::SaveTileSheet(const vector<HdPackTileInfoSms*>& inputTiles, const string& saveFolder, const string& filename, bool isSprite)
 {
-    vector<HdPackTileInfoSms*> validTiles;
-    std::unordered_set<uint64_t> tileHashes;
-    
-    if(_options.DebugMode) {
-        MessageManager::Log("[SMS HD Pack] Filtering " + std::to_string(inputTiles.size()) + " " + 
-                           string(isSprite ? "sprite" : "background") + " tiles");
+    if(inputTiles.empty()) {
+        MessageManager::Log("[SMS HD Pack] No " + string(isSprite ? "sprite" : "background") + " tiles to save");
+        return;
     }
+    
+    // Enhanced multi-stage deduplication system
+    vector<HdPackTileInfoSms*> tiles;
+    std::unordered_set<uint64_t> tileHashes;
+    std::unordered_map<uint64_t, HdPackTileInfoSms*> hashToTile;
     
     for(size_t i = 0; i < inputTiles.size(); i++) {
         HdPackTileInfoSms* tile = inputTiles[i];
         if(!tile) continue;
         
-        // Ensure tile has HD data
         if(tile->HdTileData.empty()) {
             GenerateHdTile(tile);
         }
         if(tile->HdTileData.empty()) continue;
         
-        // Filter out empty/black tiles
+        // Filter out empty/black tiles with different criteria for sprites vs backgrounds
         bool isEmpty = true;
         int nonTransparentPixels = 0;
+        int coloredPixels = 0;
         
         for(uint32_t color : tile->HdTileData) {
             if((color & 0xFF000000) != 0) { // Not transparent
                 nonTransparentPixels++;
+                // Check if it's not just black
                 uint32_t rgb = color & 0xFFFFFF;
                 if(rgb != 0x000000) {
+                    coloredPixels++;
                     isEmpty = false;
                 }
             }
         }
         
-        // Skip empty tiles
-        if(isEmpty || nonTransparentPixels < 3) {
+        // Different filtering criteria for sprites vs backgrounds
+        bool shouldSkip = false;
+        if(isSprite) {
+            // Sprites: require at least 3 non-transparent pixels with some color
+            shouldSkip = (isEmpty || nonTransparentPixels < 3);
+        } else {
+            // Backgrounds: more lenient - allow simple patterns, even if mostly black
+            // Only skip if completely transparent or has no meaningful content
+            shouldSkip = (nonTransparentPixels == 0 || (isEmpty && nonTransparentPixels < 8));
+        }
+        
+        if(shouldSkip) {
+            if(_options.DebugMode) {
+                MessageManager::Log("[SMS HD Pack] Skipping empty tile (" + 
+                                   string(isSprite ? "sprite" : "background") + "): TileIndex=" + 
+                                   std::to_string(tile->TileIndex) + 
+                                   ", NonTransparent=" + std::to_string(nonTransparentPixels) + 
+                                   ", Colored=" + std::to_string(coloredPixels));
+            }
             continue;
         }
         
-        // Simple duplicate detection using visual hash
-        uint64_t visualHash = 0;
+        bool isDuplicate = false;
+        
+        // Pure visual hash-based deduplication - only visual content matters
+        uint64_t pureVisualHash = 0;
+        
+        // Create a hash based ONLY on visual appearance, ignoring all metadata
         if(tile->HdTileData.size() >= 64) {
-            for(size_t j = 0; j < tile->HdTileData.size(); j++) {
-                uint32_t pixel = tile->HdTileData[j] & 0xFFFFFF;
-                visualHash = visualHash * 31 + pixel;
+            // Hash EVERY pixel's RGB values only (ignore alpha, indices, metadata)
+            uint64_t visualContentHash = 0;
+            for(size_t i = 0; i < tile->HdTileData.size(); i++) {
+                // Extract only RGB components, normalize any variations
+                uint32_t pixel = tile->HdTileData[i] & 0xFFFFFF; // RGB only
+                
+                // For SMS, color 0 should be treated as transparent/black consistently
+                if(pixel == 0x000000) {
+                    pixel = 0; // Normalize black/transparent
+                }
+                
+                visualContentHash = visualContentHash * 31 + pixel;
+                // Use a different multiplier every 8 pixels to avoid patterns
+                if(i % 8 == 7) visualContentHash = visualContentHash * 37;
+            }
+            
+            // ONLY use visual content - NO tile indices or metadata!
+            pureVisualHash = visualContentHash;
+            
+            // Check if this exact visual hash already exists
+            if(tileHashes.find(pureVisualHash) != tileHashes.end()) {
+                HdPackTileInfoSms* existingTile = hashToTile[pureVisualHash];
+                if(existingTile && existingTile->HdTileData.size() == tile->HdTileData.size()) {
+                    // With our comprehensive hash, this should be a guaranteed duplicate
+                    // But let's still verify the first few pixels to be absolutely certain
+                    bool identical = true;
+                    size_t checkPixels = std::min((size_t)16, tile->HdTileData.size());
+                    for(size_t k = 0; k < checkPixels; k++) {
+                        if(tile->HdTileData[k] != existingTile->HdTileData[k]) {
+                            identical = false;
+                            break;
+                        }
+                    }
+                    if(identical) {
+                        isDuplicate = true;
+                        if(_options.DebugMode) {
+                            MessageManager::Log("[SMS HD Pack] ELIMINATED visually identical tile: TileIndex=" + 
+                                               std::to_string(tile->TileIndex) + 
+                                               ", OriginalTileIndex=" + std::to_string(existingTile->TileIndex) + 
+                                               ", VisualHash=" + std::to_string(pureVisualHash));
+                        }
+                    } else {
+                        // Hash collision - very rare but possible
+                        if(_options.DebugMode) {
+                            MessageManager::Log("[SMS HD Pack] Hash collision detected - keeping both tiles");
+                        }
+                    }
+                }
             }
         }
         
-        // Check for duplicates
-        if(visualHash != 0 && tileHashes.find(visualHash) == tileHashes.end()) {
-            validTiles.push_back(tile);
-            tileHashes.insert(visualHash);
+        // Fallback: Pixel-by-pixel comparison for any remaining edge cases
+        if(!isDuplicate) {
+            for(auto& existingTile : tiles) {
+                if(!existingTile) continue;
+                if(tile->HdTileData.size() == existingTile->HdTileData.size()) {
+                    bool visuallyIdentical = true;
+                    for(size_t k = 0; k < tile->HdTileData.size(); k++) {
+                        uint32_t pixel1 = tile->HdTileData[k] & 0xFFFFFF;
+                        uint32_t pixel2 = existingTile->HdTileData[k] & 0xFFFFFF;
+                        
+                        // Normalize black/transparent pixels
+                        if(pixel1 == 0x000000) pixel1 = 0;
+                        if(pixel2 == 0x000000) pixel2 = 0;
+                        
+                        if(pixel1 != pixel2) {
+                            visuallyIdentical = false;
+                            break;
+                        }
+                    }
+                    if(visuallyIdentical) {
+                        isDuplicate = true;
+                        if(_options.DebugMode) {
+                            MessageManager::Log("[SMS HD Pack] ELIMINATED via pixel comparison: TileIndex=" + 
+                                               std::to_string(tile->TileIndex) + 
+                                               ", OriginalTileIndex=" + std::to_string(existingTile->TileIndex));
+                        }
+                        break;
+                    }
+                }
+            }
         }
-    }
-    
-    if(_options.DebugMode) {
-        MessageManager::Log("[SMS HD Pack] Filtered " + std::to_string(inputTiles.size()) + " tiles down to " + 
-                           std::to_string(validTiles.size()) + " unique tiles");
-    }
-    
-    return validTiles;
-}
-
-/**
- * Draws a single tile to the PNG buffer at the specified grid position.
- * 
- * This function copies tile pixel data from the tile's HdTileData to the PNG buffer,
- * positioning it correctly within a 16x16 grid layout. Includes bounds checking
- * to prevent buffer overruns.
- * 
- * @param tile Pointer to the tile to draw (must have valid HdTileData)
- * @param gridX X position in the 16x16 grid (0-15)
- * @param gridY Y position in the 16x16 grid (0-15)
- * @param pngBuffer Target PNG buffer to draw into
- * @param pngWidth Width of the PNG buffer in pixels
- * @param tileSize Size of each tile in pixels (typically 8 * scale)
- */
-void HdPackBuilderSms::DrawTileToBuffer(HdPackTileInfoSms* tile, int gridX, int gridY, uint32_t* pngBuffer, int pngWidth, int tileSize)
-{
-    if(!tile || tile->HdTileData.empty() || !pngBuffer) {
-        return;
-    }
-    
-    int tileX = gridX * tileSize;
-    int tileY = gridY * tileSize;
-    
-    // Copy tile data to buffer with bounds checking
-    for(int y = 0; y < tileSize && y < 8 * _hdData.Scale; y++) {
-        for(int x = 0; x < tileSize && x < 8 * _hdData.Scale; x++) {
-            int srcIndex = y * tileSize + x;
-            int dstIndex = (tileY + y) * pngWidth + (tileX + x);
-            
-            if(srcIndex < tile->HdTileData.size() && dstIndex >= 0 && 
-               dstIndex < pngWidth * (pngWidth / tileSize * 16) * tileSize) { // 16x16 grid bounds
-                pngBuffer[dstIndex] = tile->HdTileData[srcIndex];
+        
+        if(!isDuplicate) {
+            tiles.push_back(tile);
+            if(pureVisualHash != 0) {
+                tileHashes.insert(pureVisualHash);
+                hashToTile[pureVisualHash] = tile;
             }
         }
     }
-}
-
-/**
- * Generates appropriate filename for tile sheets with numbering when multiple sheets exist.
- * 
- * For single sheets, returns the base filename unchanged. For multiple sheets,
- * inserts a sheet number before the file extension (e.g., "tiles.png" becomes "tiles_1.png").
- * 
- * @param baseFilename The base filename to modify
- * @param sheetIndex Zero-based index of the current sheet
- * @param totalSheets Total number of sheets being generated
- * @return Appropriately numbered filename for the sheet
- */
-string HdPackBuilderSms::GenerateSheetFilename(const string& baseFilename, int sheetIndex, int totalSheets)
-{
-    if(totalSheets <= 1) {
-        return baseFilename;
+    
+    int duplicatesEliminated = inputTiles.size() - tiles.size();
+    float reductionPercentage = inputTiles.size() > 0 ? (float)duplicatesEliminated / inputTiles.size() * 100.0f : 0.0f;
+    
+    MessageManager::Log("[SMS HD Pack] DEDUPLICATION RESULTS for " + string(isSprite ? "sprite" : "background") + " sheet:");
+    MessageManager::Log("[SMS HD Pack] Input tiles: " + std::to_string(inputTiles.size()));
+    MessageManager::Log("[SMS HD Pack] Unique tiles: " + std::to_string(tiles.size()));
+    MessageManager::Log("[SMS HD Pack] Duplicates eliminated: " + std::to_string(duplicatesEliminated) + 
+                       " (" + std::to_string((int)reductionPercentage) + "% reduction)");
+    
+    // Additional debug logging
+    if(_options.DebugMode && tiles.size() > 0) {
+        MessageManager::Log("[SMS HD Pack] Sample tile info: TileIndex=" + std::to_string(tiles[0]->TileIndex) + 
+                           ", PaletteColors=" + std::to_string(tiles[0]->PaletteColors) + 
+                           ", HdDataSize=" + std::to_string(tiles[0]->HdTileData.size()));
     }
     
-    size_t dotPos = baseFilename.find_last_of('.');
-    if(dotPos != string::npos) {
-        return baseFilename.substr(0, dotPos) + "_" + std::to_string(sheetIndex + 1) + baseFilename.substr(dotPos);
-    } else {
-        return baseFilename + "_" + std::to_string(sheetIndex + 1);
+    // If no valid tiles remain after filtering, don't create empty sheets
+    if(tiles.empty()) {
+        MessageManager::Log("[SMS HD Pack] No valid tiles remaining after filtering for " + 
+                           string(isSprite ? "sprite" : "background") + " sheet - skipping");
+        return;
     }
-}
-
-/**
- * Creates and saves 16x16 tile sheets from the provided tiles.
- * 
- * This function organizes tiles into 16x16 grids (256 tiles per sheet) to minimize
- * the number of output files while maximizing packing efficiency. Each sheet is
- * saved as a PNG file with appropriate numbering if multiple sheets are needed.
- * 
- * @param tiles Vector of valid tiles to organize into sheets
- * @param saveFolder Directory where PNG files should be saved
- * @param filename Base filename for the PNG files
- * @param isSprite Whether these are sprite tiles (affects logging messages)
- */
-void HdPackBuilderSms::CreateTileSheets(const vector<HdPackTileInfoSms*>& tiles, const string& saveFolder, const string& filename, bool isSprite)
-{
-    const int TILES_PER_SHEET = 16 * 16;
+    
+    // First, ensure all tiles have HD data generated and do basic sorting
+    for(auto& tile : tiles) {
+        if(tile && tile->HdTileData.empty()) {
+            this->GenerateHdTile(tile);
+        }
+    }
+    
+    // Simple sorting by visual characteristics for consistent layout
+    std::sort(tiles.begin(), tiles.end(), [this](HdPackTileInfoSms* a, HdPackTileInfoSms* b) {
+        if(!a) return false;
+        if(!b) return true;
+        
+        // Sort by palette first
+        if(a->PaletteIndex != b->PaletteIndex) {
+            return a->PaletteIndex < b->PaletteIndex;
+        }
+        
+        // Then by visual hash for consistent grouping
+        uint32_t hashA = this->GetTileVisualHash(a);
+        uint32_t hashB = this->GetTileVisualHash(b);
+        
+        if(hashA != hashB) {
+            return hashA < hashB;
+        }
+        
+        return a->TileIndex < b->TileIndex;
+    });
+    
+    // Use fixed 16x16 grids to minimize file count and maximize tile packing
+    const int TILES_PER_SHEET = 16 * 16; // 256 tiles per sheet
     const int gridWidth = 16;
     const int gridHeight = 16;
+    
+    // Calculate how many sheets we need
     int totalSheets = (tiles.size() + TILES_PER_SHEET - 1) / TILES_PER_SHEET;
     
+    if(_options.DebugMode) {
+        MessageManager::Log("[SMS HD Pack] Using 16x16 grid layout for maximum packing:");
+        MessageManager::Log("[SMS HD Pack] Total tiles: " + std::to_string(tiles.size()));
+        MessageManager::Log("[SMS HD Pack] Sheets needed: " + std::to_string(totalSheets));
+        MessageManager::Log("[SMS HD Pack] Tiles per sheet: up to " + std::to_string(TILES_PER_SHEET));
+    }
+    // Process tiles in batches of 256 (16x16 sheets) to minimize file count
     for(int sheetIndex = 0; sheetIndex < totalSheets; sheetIndex++) {
         int startTile = sheetIndex * TILES_PER_SHEET;
         int endTile = std::min((int)tiles.size(), startTile + TILES_PER_SHEET);
-        int tilesInSheet = endTile - startTile;
+        int tilesInThisSheet = endTile - startTile;
         
         int tileSize = 8 * _hdData.Scale;
         int pngWidth = gridWidth * tileSize;
         int pngHeight = gridHeight * tileSize;
         
-        vector<uint32_t> pngBuffer(pngWidth * pngHeight, 0x00000000);
-        
-        // Draw tiles to buffer using helper function
-        for(int i = 0; i < tilesInSheet; i++) {
-            HdPackTileInfoSms* tile = tiles[startTile + i];
-            if(!tile || tile->HdTileData.empty()) continue;
-            
-            int gridX = i % gridWidth;
-            int gridY = i / gridWidth;
-            
-            DrawTileToBuffer(tile, gridX, gridY, pngBuffer.data(), pngWidth, tileSize);
+        if(_options.DebugMode) {
+            MessageManager::Log("[SMS HD Pack] Creating sheet " + std::to_string(sheetIndex + 1) + "/" + std::to_string(totalSheets) + 
+                               " for " + string(isSprite ? "sprite" : "background") + " tiles: " + 
+                               std::to_string(pngWidth) + "x" + std::to_string(pngHeight) + 
+                               " pixels, " + std::to_string(tilesInThisSheet) + " tiles");
         }
         
-        // Generate filename and save PNG
-        string sheetFilename = GenerateSheetFilename(filename, sheetIndex, totalSheets);
+        // Initialize buffer with transparent background
+        vector<uint32_t> pngBuffer(pngWidth * pngHeight, 0x00000000); // Transparent background
+    
+        // Get the tiles for this sheet (already sorted and deduplicated)
+        // Get the tiles for this sheet (already sorted and deduplicated)
+        vector<HdPackTileInfoSms*> sheetTiles;
+        for(int i = startTile; i < endTile; i++) {
+            if(tiles[i]) {
+                sheetTiles.push_back(tiles[i]);
+            }
+        }
+        
+        // Draw tiles directly to the buffer in a clean 16x16 grid
+        int actualTilesDrawn = 0;
+        
+        for(int i = 0; i < tilesInThisSheet; i++) {
+            if(i >= sheetTiles.size() || !sheetTiles[i]) continue;
+            
+            // Double-check tile has valid data before drawing
+            if(sheetTiles[i]->HdTileData.empty()) {
+                if(_options.DebugMode) {
+                    MessageManager::Log("[SMS HD Pack] Skipping tile with empty HD data at position " + std::to_string(i));
+                }
+                continue;
+            }
+            
+            // Calculate position in the 16x16 grid
+            int gridX = actualTilesDrawn % gridWidth;
+            int gridY = actualTilesDrawn / gridWidth;
+            
+            // Calculate pixel position in the PNG
+            int tileX = gridX * tileSize;
+            int tileY = gridY * tileSize;
+            
+            // Update tile position for manifest (relative to this sheet)
+            sheetTiles[i]->X = tileX;
+            sheetTiles[i]->Y = tileY;
+            
+            actualTilesDrawn++;
+            
+            // Copy tile data to PNG buffer
+            int tilePos = 0;
+            for(int y = 0; y < tileSize; y++) {
+                for(int x = 0; x < tileSize; x++) {
+                    if(tilePos < sheetTiles[i]->HdTileData.size()) {
+                        pngBuffer[(tileY + y) * pngWidth + (tileX + x)] = sheetTiles[i]->HdTileData[tilePos++];
+                    }
+                }
+            }
+        }
+        
+        // Generate filename with sheet number if multiple sheets
+        string sheetFilename = filename;
+        if(totalSheets > 1) {
+            // Insert sheet number before file extension
+            size_t dotPos = filename.find_last_of('.');
+            if(dotPos != string::npos) {
+                sheetFilename = filename.substr(0, dotPos) + "_" + std::to_string(sheetIndex + 1) + filename.substr(dotPos);
+            } else {
+                sheetFilename = filename + "_" + std::to_string(sheetIndex + 1);
+            }
+        }
+        
+        // Save PNG
         string fullPath = FolderUtilities::CombinePath(saveFolder, sheetFilename);
+        
+        // Normalize path separators
+        for(char& c : fullPath) {
+            if(c == '/') {
+#ifdef _WIN32
+                c = '\\';
+#endif
+            }
+        }
+        
+        if(_options.DebugMode) {
+            MessageManager::Log("[SMS HD Pack] Saving " + string(isSprite ? "sprite" : "background") + " tile sheet " + 
+                               std::to_string(sheetIndex + 1) + "/" + std::to_string(totalSheets) + ": " + fullPath);
+        }
+        
         bool success = PNGHelper::WritePNG(fullPath, pngBuffer.data(), pngWidth, pngHeight, 32);
         
         if(success) {
-            MessageManager::Log("[SMS HD Pack] Saved " + string(isSprite ? "sprite" : "background") + 
-                               " sheet: " + sheetFilename + " (" + std::to_string(tilesInSheet) + " tiles)");
+            MessageManager::Log("[SMS HD Pack] Successfully saved " + string(isSprite ? "sprite" : "background") + " tile sheet: " + sheetFilename + 
+                               " (" + std::to_string(actualTilesDrawn) + " tiles)");
         } else {
-            MessageManager::Log("[SMS HD Pack] Failed to save " + string(isSprite ? "sprite" : "background") + " sheet: " + sheetFilename);
+            MessageManager::Log("[SMS HD Pack] Failed to save " + string(isSprite ? "sprite" : "background") + " tile sheet: " + sheetFilename);
         }
-    }
-}
-
-/**
- * Main function to save tiles as organized PNG sheets.
- * 
- * This function coordinates the entire tile sheet creation process:
- * 1. Validates input and performs early exit for empty tile sets
- * 2. Filters tiles to remove empty/invalid ones and eliminate duplicates
- * 3. Creates and saves 16x16 tile sheets with proper organization
- * 
- * The function uses a modular approach with helper functions for better
- * maintainability and clarity. All tiles are deduplicated using visual
- * content hashing to ensure no duplicate tiles appear in the output.
- * 
- * @param inputTiles Vector of tile pointers to process and save
- * @param saveFolder Directory where PNG files should be saved
- * @param filename Base filename for the PNG files
- * @param isSprite Whether these are sprite tiles (affects filtering and logging)
- */
-void HdPackBuilderSms::SaveTileSheet(const vector<HdPackTileInfoSms*>& inputTiles, const string& saveFolder, const string& filename, bool isSprite)
-{
-    // Early exit for empty input
-    if(inputTiles.empty()) {
-        if(_options.DebugMode) {
-            MessageManager::Log("[SMS HD Pack] No tiles to save for " + string(isSprite ? "sprite" : "background") + " sheet");
-        }
-        return;
-    }
-    
-    if(_options.DebugMode) {
-        MessageManager::Log("[SMS HD Pack] Processing " + std::to_string(inputTiles.size()) + " " + 
-                           string(isSprite ? "sprite" : "background") + " tiles");
-    }
-    
-    // Step 1: Filter out empty/invalid tiles and remove duplicates
-    vector<HdPackTileInfoSms*> validTiles = FilterValidTiles(inputTiles, isSprite);
-    
-    if(validTiles.empty()) {
-        MessageManager::Log("[SMS HD Pack] No valid tiles found for " + string(isSprite ? "sprite" : "background") + " sheet");
-        return;
-    }
-    
-    // Step 2: Create and save 16x16 tile sheets
-    CreateTileSheets(validTiles, saveFolder, filename, isSprite);
+    } // End of sheet loop
 }
 
 uint32_t HdPackBuilderSms::GetTileVisualHash(const HdPackTileInfoSms* tile) const
@@ -1903,306 +2211,8 @@ uint32_t HdPackBuilderSms::GetTileVisualHash(const HdPackTileInfoSms* tile) cons
     return hash;
 }
 
-// Helper function to read tile data from VRAM
-// Reads 32 bytes of tile data and performs validation
-bool HdPackBuilderSms::ReadTileDataFromVram(HdPackTileInfoSms* tile, uint8_t* tileData) {
-    if (!tile || !_vdp) {
-        MessageManager::Log("[SMS HD Pack] ERROR: Invalid tile or VDP not available");
-        return false;
-    }
-    
-    // Calculate the actual VRAM address for this tile
-    uint16_t tileAddr = tile->TileIndex * SmsHdPackConstants::SMS_TILE_DATA_SIZE;
-    
-    // Read the tile data from VRAM
-    for(int i = 0; i < SmsHdPackConstants::SMS_TILE_DATA_SIZE; i++) {
-        tileData[i] = _vdp->DebugReadVram(tileAddr + i);
-    }
-    
-    // Store the tile data in the tile object
-    memcpy(tile->TileData, tileData, SmsHdPackConstants::SMS_TILE_DATA_SIZE);
-    
-    // Check if tile data is all zeros (which would result in blank tiles)
-    bool allZeros = true;
-    for(int i = 0; i < SmsHdPackConstants::SMS_TILE_DATA_SIZE; i++) {
-        if(tileData[i] != 0) {
-            allZeros = false;
-            break;
-        }
-    }
-    
-    if(allZeros && _options.DebugMode) {
-        MessageManager::Log("[SMS HD Pack] WARNING: Tile data is all zeros for tile at address 0x" + 
-                           HexUtilities::ToHex(tileAddr) + ", this will result in a blank tile");
-    }
-    
-    return true;
-}
-
-// Helper function to get pixel color from color index and palette
-uint32_t HdPackBuilderSms::GetPixelColor(uint8_t colorIndex, HdPackTileInfoSms* tile) {
-    // Handle transparent pixels
-    if(colorIndex == 0) {
-        return 0x00000000; // Transparent (alpha = 0)
-    }
-    
-    // Get the current VDP state to access the most up-to-date palette
-    uint8_t* paletteRam = _vdp->GetPaletteRam();
-    
-    if(!paletteRam) {
-        MessageManager::Log("[SMS HD Pack] ERROR: Cannot access palette RAM");
-        return 0xFFFF00FF; // Magenta (error indicator)
-    }
-    
-    // Calculate palette index based on sprite/background type
-    uint8_t paletteIndex;
-    if(tile->IsSprite) {
-        // For sprites, use the sprite palette (second half of palette RAM)
-        paletteIndex = 16 + (colorIndex % 16);
-    } else {
-        // For background tiles, use the background palette (first half of palette RAM)
-        paletteIndex = colorIndex % 16;
-    }
-    
-    // Get the raw SMS color value directly from palette RAM
-    uint8_t smsColor = paletteRam[paletteIndex];
-    
-    // Convert the SMS color to ARGB format
-    uint32_t color = ConvertSmsColor(smsColor);
-    
-    // Ensure alpha channel is fully opaque for non-transparent pixels
-    return (color & 0x00FFFFFF) | 0xFF000000;
-}
-
-// Helper function to process all pixels in a tile
-void HdPackBuilderSms::ProcessTilePixels(HdPackTileInfoSms* tile, const uint8_t* tileData) {
-    int scale = _hdData.Scale;
-    int width = SmsHdPackConstants::SMS_TILE_SIZE * scale;
-    
-    // Process each pixel in the original 8x8 tile
-    for(int y = 0; y < SmsHdPackConstants::SMS_TILE_SIZE; y++) {
-        // Each row starts at y*4 in the tile data (4 bitplanes per row)
-        int rowOffset = y * SmsHdPackConstants::SMS_BITPLANES;
-        
-        // Get the 4 bytes for this row (one byte per bitplane)
-        uint8_t plane0 = tileData[rowOffset + 0];
-        uint8_t plane1 = tileData[rowOffset + 1];
-        uint8_t plane2 = tileData[rowOffset + 2];
-        uint8_t plane3 = tileData[rowOffset + 3];
-        
-        // Process each pixel in the current row
-        for(int x = 0; x < SmsHdPackConstants::SMS_TILE_SIZE; x++) {
-            // Extract pixel color index from bitplanes
-            uint8_t colorIndex = ExtractPixelFromBitplanes(plane0, plane1, plane2, plane3, x);
-            
-            // Get the color from the palette
-            uint32_t color = GetPixelColor(colorIndex, tile);
-            
-            // Fill the scaled tile with the color
-            for(int sy = 0; sy < scale; sy++) {
-                for(int sx = 0; sx < scale; sx++) {
-                    // Calculate the correct index in the HD tile data buffer
-                    int destX = x * scale + sx;
-                    int destY = y * scale + sy;
-                    int hdIndex = destY * width + destX;
-                    
-                    // Ensure we're within bounds
-                    if(hdIndex >= 0 && hdIndex < tile->HdTileData.size()) {
-                        tile->HdTileData[hdIndex] = color;
-                    }
-                }
-            }
-        }
-    }
-}
-
-// Helper function to apply debug effects to tiles
-void HdPackBuilderSms::ApplyDebugEffects(HdPackTileInfoSms* tile) {
-    if (!_options.DebugMode) {
-        return;
-    }
-    
-    int scale = _hdData.Scale;
-    int width = SmsHdPackConstants::SMS_TILE_SIZE * scale;
-    
-    // Add debug grid pattern to help visualize pixel boundaries
-    for(int y = 0; y < SmsHdPackConstants::SMS_TILE_SIZE; y++) {
-        for(int x = 0; x < SmsHdPackConstants::SMS_TILE_SIZE; x++) {
-            // Add edge highlighting for tile boundary visualization
-            if(x == 0 || y == 0 || x == 7 || y == 7) {
-                for(int sy = 0; sy < scale; sy++) {
-                    for(int sx = 0; sx < scale; sx++) {
-                        int destX = x * scale + sx;
-                        int destY = y * scale + sy;
-                        int hdIndex = destY * width + destX;
-                        
-                        if(hdIndex >= 0 && hdIndex < tile->HdTileData.size()) {
-                            uint32_t color = tile->HdTileData[hdIndex];
-                            
-                            // Make edge pixels slightly darker for tile boundary visualization
-                            uint8_t r = color & 0xFF;
-                            uint8_t g = (color >> 8) & 0xFF;
-                            uint8_t b = (color >> 16) & 0xFF;
-                            
-                            // Darken by 20%
-                            r = (uint8_t)(r * 0.8f);
-                            g = (uint8_t)(g * 0.8f);
-                            b = (uint8_t)(b * 0.8f);
-                            
-                            tile->HdTileData[hdIndex] = 0xFF000000 | (b << 16) | (g << 8) | r;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    // Apply debug overlay if enabled
-    if(_options.HighlightSprites) {
-        GenerateDebugOverlay(tile, tile->IsSprite);
-    }
-}
-
-// Helper function to validate VDP and set default palette if needed
-bool HdPackBuilderSms::ValidateVdpAndSetDefaults() {
-    if(!_vdp) {
-        MessageManager::Log("[SMS HD Pack] Warning: VDP not available, using default palette");
-        InitializeDefaultSmsPalette();
-        return false;
-    }
-    
-    if(_options.DebugMode) {
-        MessageManager::Log("[SMS HD Pack] Updating palette from VDP");
-    }
-    
-    return true;
-}
-
-// Helper function to process Game Gear 12-bit RGB palette
-void HdPackBuilderSms::ProcessGameGearPalette() {
-    for(int i = 0; i < 16; i++) {
-        // Background palette (entries 0-15)
-        uint16_t ggColor = _vdp->GetInternalPaletteRam()[i];
-        
-        // Extract 4-bit RGB components from 12-bit GG color
-        uint8_t r = (ggColor & 0x0F);
-        uint8_t g = ((ggColor >> 4) & 0x0F);
-        uint8_t b = ((ggColor >> 8) & 0x0F);
-        
-        // Convert 4-bit values (0-15) to 8-bit (0-255)
-        r = (r << 4) | r;
-        g = (g << 4) | g;
-        b = (b << 4) | b;
-        
-        // Store as ARGB
-        _bgPalette[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
-        
-        // Sprite palette (entries 16-31)
-        ggColor = _vdp->GetInternalPaletteRam()[16 + i];
-        
-        // Extract and convert components
-        r = (ggColor & 0x0F);
-        g = ((ggColor >> 4) & 0x0F);
-        b = ((ggColor >> 8) & 0x0F);
-        
-        r = (r << 4) | r;
-        g = (g << 4) | g;
-        b = (b << 4) | b;
-        
-        _spritePalette[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
-    }
-}
-
-// Helper function to process SMS 6-bit RGB palette
-void HdPackBuilderSms::ProcessSmsPalette() {
-    uint8_t* paletteRam = _vdp->GetPaletteRam();
-    if(!paletteRam) {
-        MessageManager::Log("[SMS HD Pack] Warning: Could not access SMS palette RAM, using defaults");
-        InitializeDefaultSmsPalette();
-        return;
-    }
-    
-    for(int i = 0; i < 16; i++) {
-        // Background palette (entries 0-15)
-        uint8_t smsColor = paletteRam[i];
-        _bgPalette[i] = ConvertSmsColor(smsColor);
-        
-        // Sprite palette (entries 16-31)
-        smsColor = paletteRam[16 + i];
-        _spritePalette[i] = ConvertSmsColor(smsColor);
-        
-        // Log palette data for debugging if enabled
-        if(_options.DebugMode && _options.ShowPaletteInfo) {
-            std::stringstream ss;
-            ss << "[SMS HD Pack] Palette [" << i << "] BG=0x" 
-               << std::hex << std::setw(2) << std::setfill('0') << (int)paletteRam[i]
-               << " -> 0x" << std::hex << std::setw(8) << std::setfill('0') << _bgPalette[i]
-               << ", Sprite=0x" << std::hex << std::setw(2) << std::setfill('0') << (int)paletteRam[16+i]
-               << " -> 0x" << std::hex << std::setw(8) << std::setfill('0') << _spritePalette[i];
-            MessageManager::Log(ss.str());
-        }
-    }
-    
-    // Additional debug logging for background palette
-    if(_options.DebugMode) {
-        for(int i = 0; i < 16; i++) {
-            MessageManager::Log("[SMS HD Pack] BG Palette [" + std::to_string(i) + "] = 0x" + 
-                              HexUtilities::ToHex(paletteRam[i]) + " -> 0x" + 
-                              HexUtilities::ToHex(_bgPalette[i]));
-        }
-    }
-}
-
-// Helper function to process SG-1000 15-bit RGB palette
-void HdPackBuilderSms::ProcessSg1000Palette() {
-    const uint16_t* sgPalette = _vdp->GetSmsSgPalette();
-    if(!sgPalette) {
-        MessageManager::Log("[SMS HD Pack] Warning: Could not access SG palette, using defaults");
-        InitializeDefaultSmsPalette();
-        return;
-    }
-    
-    for(int i = 0; i < 16; i++) {
-        // SG-1000 uses 15-bit RGB format (0BBBBBGGGGGRRRRR)
-        uint16_t rgb555 = sgPalette[i];
-        
-        // Extract 5-bit components
-        uint8_t r = rgb555 & 0x1F;
-        uint8_t g = (rgb555 >> 5) & 0x1F;
-        uint8_t b = (rgb555 >> 10) & 0x1F;
-        
-        // Convert 5-bit to 8-bit
-        r = (r << 3) | (r >> 2);
-        g = (g << 3) | (g >> 2);
-        b = (b << 3) | (b >> 2);
-        
-        // Store as ARGB
-        uint32_t color = 0xFF000000 | (r << 16) | (g << 8) | b;
-        _bgPalette[i] = color;
-        _spritePalette[i] = color; // Same palette for both
-    }
-    
-    if(_options.DebugMode) {
-        MessageManager::Log("[SMS HD Pack] Successfully loaded SG-1000 palette data");
-    }
-}
-
-// Helper function to finalize transparency and logging
-void HdPackBuilderSms::FinalizeTransparencyAndLogging() {
-    // Always set transparent color (index 0) to fully transparent
-    _bgPalette[0] = 0x00000000;
-    _spritePalette[0] = 0x00000000;
-    
-    if(_options.DebugMode) {
-        MessageManager::Log("[SMS HD Pack] Successfully loaded VDP palette data");
-    }
-    
-    if(_options.DebugMode && _options.ShowPaletteInfo) {
-        LogPaletteInfo();
-    }
-}
-
-void HdPackBuilderSms::VerifyPaletteUsage(HdPackTileInfoSms* tile, uint8_t* paletteRam) {
+void HdPackBuilderSms::VerifyPaletteUsage(HdPackTileInfoSms* tile, uint8_t* paletteRam)
+{
     if (!tile || !paletteRam) return;
     
     std::set<uint8_t> usedIndices;

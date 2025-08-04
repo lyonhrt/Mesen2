@@ -38,6 +38,7 @@ struct HdPackBuilderOptions {
     bool DumpVramContents = false;     // Dump VRAM contents for debugging
     bool HighlightSprites = false;     // Add visual indicators to sprite tiles
     bool DumpPaletteImage = false;     // Generate palette visualization image
+    bool ShowTileGrid = false;         // Show grid lines around tiles in output
     bool TraceSprites = false;       // Special debug for sprite rendering issues
     bool VerboseLogging = false;       // Extra verbose logging for all operations
 };
@@ -95,8 +96,36 @@ private:
     void AddTile(HdPackTileInfoSms* tile, uint32_t usageCount);
     uint32_t GetVramBankId(uint32_t tileAddr);
     void GenerateHdTile(HdPackTileInfoSms* tile);
-    void SaveTileSheet(const vector<HdPackTileInfoSms*>& tiles, const string& saveFolder, int sheetIndex, bool isSprite);
+    void SaveTileSheet(const vector<HdPackTileInfoSms*>& tiles, const string& saveFolder, const string& filename, bool isSprite);
     void DrawTile(HdPackTileInfoSms* tile, int tileNumber, uint32_t* pngBuffer, int pngWidth);
+    
+    // SaveTileSheet helper functions for better modularity
+    vector<HdPackTileInfoSms*> FilterValidTiles(const vector<HdPackTileInfoSms*>& inputTiles, bool isSprite);
+    void CreateTileSheets(const vector<HdPackTileInfoSms*>& tiles, const string& saveFolder, const string& filename, bool isSprite);
+    void DrawTileToBuffer(HdPackTileInfoSms* tile, int gridX, int gridY, uint32_t* pngBuffer, int pngWidth, int tileSize);
+    string GenerateSheetFilename(const string& baseFilename, int sheetIndex, int totalSheets);
+    
+    // GenerateHdTile helper functions for better modularity
+    bool ReadTileDataFromVram(HdPackTileInfoSms* tile, uint8_t* tileData);
+    uint32_t GetPixelColor(uint8_t colorIndex, HdPackTileInfoSms* tile);
+    void ProcessTilePixels(HdPackTileInfoSms* tile, const uint8_t* tileData);
+    void ApplyDebugEffects(HdPackTileInfoSms* tile);
+    
+    // UpdatePalette helper functions for better modularity
+    bool ValidateVdpAndSetDefaults();
+    void ProcessGameGearPalette();
+    void ProcessSmsPalette();
+    void ProcessSg1000Palette();
+    void FinalizeTransparencyAndLogging();
+    
+    // Advanced deduplication and arrangement methods
+    bool ProcessTile(HdPackTileInfoSms* tile);
+    uint64_t GetTileHash(HdPackTileInfoSms* tile);
+    uint64_t GetPreciseTileHash(HdPackTileInfoSms* tile);
+    uint32_t GetTileVisualHash(const HdPackTileInfoSms* tile) const;
+    uint32_t countBits(uint32_t value) const;
+    void GroupRelatedTiles(std::vector<HdPackTileInfoSms*>& tiles, std::vector<std::vector<HdPackTileInfoSms*>>& groupedTiles, bool useCache);
+    void VerifyPaletteUsage(HdPackTileInfoSms* tile, uint8_t* paletteRam);
     string CleanFilename(const string& filename);  // Helper for sanitizing filenames
     
     // Palette and debugging functions

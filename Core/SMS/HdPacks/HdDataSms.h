@@ -13,6 +13,18 @@ struct HdTileKeySms {
     bool IsVramTile = false;
 
     bool operator==(const HdTileKeySms& other) const {
+        // Always compare the first 4 bytes of TileData which contains the visual hash
+        // This ensures visually identical tiles are considered equal
+        uint32_t thisHash, otherHash;
+        memcpy(&thisHash, TileData, sizeof(thisHash));
+        memcpy(&otherHash, other.TileData, sizeof(otherHash));
+        
+        // If visual hashes match, consider the tiles equal
+        if (thisHash == otherHash && PaletteColors == other.PaletteColors) {
+            return true;
+        }
+        
+        // Fall back to traditional comparison for VRAM tiles
         if(IsVramTile) {
             return memcmp(TileData, other.TileData, sizeof(TileData)) == 0 && PaletteColors == other.PaletteColors;
         } else {
@@ -49,17 +61,29 @@ struct HdPackBitmapInfoSms {
     }
 };
 
+// SMS-specific screen info structure for HD pack conditions
+struct HdScreenInfoSms {
+    uint64_t FrameNumber = 0;
+    unordered_map<uint32_t, uint8_t> WatchedAddressValues;
+};
+
 struct HdPackTileInfoSms : public HdTileKeySms {
     HdPackBitmapInfoSms* Bitmap = nullptr;
     uint32_t BitmapIndex = 0;
-    uint32_t X = 0;
-    uint32_t Y = 0;
+    uint32_t X = 0;          // X position in tile sheet
+    uint32_t Y = 0;          // Y position in tile sheet
+    uint32_t ScreenX = 0;    // X position on screen (for on-screen layout)
+    uint32_t ScreenY = 0;    // Y position on screen (for on-screen layout)
     uint32_t Width = 8;
     uint32_t Height = 8;
     uint32_t Brightness = 255;
     bool DefaultTile = false;
     bool ForceDisableCache = false;
     bool IsSprite = false;  // Added for SMS sprite/background distinction
+    bool HorizontalMirroring = false; // Added for SMS HD pack conditions
+    bool VerticalMirroring = false;   // Added for SMS HD pack conditions
+    bool BackgroundPriority = false;  // Added for SMS HD pack conditions
+    uint8_t PaletteIndex = 0;         // Palette index (0 or 1 for SMS)
     uint32_t VramBankId = 0;
     vector<uint32_t> HdTileData; // HD tile pixel data for PNG generation
     vector<HdPackConditionSms*> Conditions;
