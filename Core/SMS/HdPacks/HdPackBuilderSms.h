@@ -118,6 +118,9 @@ private:
     void ProcessSg1000Palette();
     void FinalizeTransparencyAndLogging();
     
+    // HD Pack manifest generation
+    void GenerateHdPackTileEntries(std::ofstream& manifestFile);
+    
     // Advanced deduplication and arrangement methods
     bool ProcessTile(HdPackTileInfoSms* tile);
     uint64_t GetTileHash(HdPackTileInfoSms* tile);

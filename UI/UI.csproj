@@ -640,7 +640,7 @@
     <EmbeddedResource Include="Debugger\Utilities\LuaScripts\NtscSafeArea.lua" />
     <EmbeddedResource Include="Debugger\Utilities\LuaScripts\NesPianoRoll.lua" />
     <EmbeddedResource Include="Debugger\Utilities\LuaScripts\ReverseMode.lua" />
-    <EmbeddedResource Include="Dependencies.zip" />
+    <EmbeddedResource Include="Dependencies.zip" Condition="Exists('Dependencies.zip')" />
     <EmbeddedResource Include="Localization\resources.en.xml" WithCulture="false" Type="Non-Resx" />
     <EmbeddedResource Include="Utilities\DipSwitchDefinitions.xml" />
   </ItemGroup>
@@ -650,8 +650,8 @@
     </AvaloniaXaml>
   </ItemGroup>
 
-  <Target Name="PreBuildWindows" BeforeTargets="PreBuildEvent" Condition="'$(RuntimeIdentifier)'=='win-x64'">
-    <Exec Command="cd &quot;$(OutDir)&quot; &amp;&amp; if exist Dependencies rd Dependencies /s /q &amp;&amp; md Dependencies &amp;&amp; if exist &quot;$(ProjectDir)Dependencies&quot; xcopy /s &quot;$(ProjectDir)Dependencies\*&quot; Dependencies &amp;&amp; if exist libHarfBuzzSharp.dll copy libHarfBuzzSharp.dll Dependencies &amp;&amp; if exist libSkiaSharp.dll copy libSkiaSharp.dll Dependencies &amp;&amp; if exist MesenCore.dll copy MesenCore.dll Dependencies &amp;&amp; cd Dependencies &amp;&amp; if exist ..\Dependencies.zip del ..\Dependencies.zip &amp;&amp; powershell Compress-Archive -Path * -DestinationPath '..\Dependencies.zip' -Force &amp;&amp; copy ..\Dependencies.zip &quot;$(ProjectDir)&quot;" />
+  <Target Name="PreBuildWindows" BeforeTargets="BeforeBuild;PrepareForBuild" Condition="'$(RuntimeIdentifier)'=='win-x64'">
+    <Exec Command="cd &quot;$(OutDir)&quot; &amp;&amp; if exist Dependencies rd Dependencies /s /q &amp;&amp; md Dependencies &amp;&amp; if exist &quot;$(ProjectDir)Dependencies&quot; xcopy /s &quot;$(ProjectDir)Dependencies\*&quot; Dependencies &amp;&amp; if exist libHarfBuzzSharp.dll copy libHarfBuzzSharp.dll Dependencies &amp;&amp; if exist libSkiaSharp.dll copy libSkiaSharp.dll Dependencies &amp;&amp; if exist MesenCore.dll copy MesenCore.dll Dependencies &amp;&amp; cd Dependencies &amp;&amp; if exist ..\Dependencies.zip del ..\Dependencies.zip &amp;&amp; powershell Compress-Archive -Path * -DestinationPath '..\Dependencies.zip' -Force &amp;&amp; copy ..\Dependencies.zip &quot;$(ProjectDir)&quot;" ContinueOnError="false" />
   </Target>
 
 	<Target Name="PreBuildLinux" BeforeTargets="PreBuildEvent" Condition="'$(RuntimeIdentifier)'=='linux-x64' Or '$(RuntimeIdentifier)'=='linux-arm64'">
@@ -660,6 +660,16 @@
   
 	<Target Name="PreBuildOsx" BeforeTargets="PreBuildEvent" Condition="'$(RuntimeIdentifier)'=='osx-x64' Or '$(RuntimeIdentifier)'=='osx-arm64'">
     <Exec Command="cp ./Assets/MesenIcon.icns $(OutDir)&#xD;&#xA;cd $(OutDir)&#xD;&#xA;rm -R Dependencies&#xD;&#xA;mkdir Dependencies&#xD;&#xA;cp -R $(ProjectDir)/Dependencies/* Dependencies&#xD;&#xA;cp libHarfBuzzSharp.dylib Dependencies&#xD;&#xA;cp libSkiaSharp.dylib Dependencies&#xD;&#xA;cp MesenCore.dylib Dependencies&#xD;&#xA;cd Dependencies&#xD;&#xA;rm ../Dependencies.zip&#xD;&#xA;zip -r ../Dependencies.zip *&#xD;&#xA;cp ../Dependencies.zip $(ProjectDir)" />
+  </Target>
+
+  <!-- Fallback target to create empty Dependencies.zip if it doesn't exist (for CI builds) -->
+  <Target Name="EnsureDependenciesZip" BeforeTargets="BeforeBuild" Condition="!Exists('Dependencies.zip')">
+    <Message Text="Creating fallback Dependencies.zip for CI build" Importance="high" />
+    <MakeDir Directories="$(ProjectDir)TempDeps" />
+    <WriteLinesToFile File="$(ProjectDir)TempDeps/placeholder.txt" Lines="Placeholder file for CI build" />
+    <Exec Command="powershell Compress-Archive -Path '$(ProjectDir)TempDeps/*' -DestinationPath '$(ProjectDir)Dependencies.zip' -Force" Condition="'$(OS)' == 'Windows_NT'" ContinueOnError="true" />
+    <Exec Command="cd '$(ProjectDir)TempDeps' &amp;&amp; zip -r '../Dependencies.zip' *" Condition="'$(OS)' != 'Windows_NT'" ContinueOnError="true" />
+    <RemoveDir Directories="$(ProjectDir)TempDeps" />
   </Target>
 
 </Project>
