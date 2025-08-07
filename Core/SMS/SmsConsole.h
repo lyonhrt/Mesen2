@@ -15,6 +15,11 @@ class SmsFmAudio;
 class SmsCart;
 class SmsControlManager;
 class SmsMemoryManager;
+class HdPackBuilderSms;
+
+struct HdPackBuilderOptions;
+struct ExecuteShortcutParams;
+enum class ConsoleNotificationType;
 
 class SmsConsole final : public IConsole
 {
@@ -27,6 +32,7 @@ private:
 	unique_ptr<SmsPsg> _psg;
 	unique_ptr<SmsFmAudio> _fmAudio;
 	unique_ptr<SmsCart> _cart;
+	unique_ptr<HdPackBuilderSms> _hdPackBuilder;
 	RomFormat _romFormat = RomFormat::Sms;
 	SmsModel _model = SmsModel::Sms;
 	ConsoleRegion _region = ConsoleRegion::Ntsc;
@@ -89,6 +95,11 @@ public:
 	void GetConsoleState(BaseState& state, ConsoleType consoleType) override;
 
 	void InitializeRam(void* data, uint32_t length);
+
+	// HD Pack recording support
+	void ProcessNotification(ConsoleNotificationType type, void* parameter);
+	void StartRecordingHdPack(HdPackBuilderOptions options);
+	void StopRecordingHdPack();
 
 	void Serialize(Serializer& s) override;
 };

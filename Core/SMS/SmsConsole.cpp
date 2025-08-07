@@ -17,6 +17,9 @@
 #include "Shared/Emulator.h"
 #include "Shared/CheatManager.h"
 #include "Shared/FirmwareHelper.h"
+#include "SMS/HdPacks/HdPackBuilderSms.h"
+#include "Shared/SaveStateManager.h"
+#include "Shared/Video/VideoDecoder.h"
 #include "Utilities/Serializer.h"
 #include "Utilities/StringUtilities.h"
 #include "Utilities/CRC32.h"
@@ -352,6 +355,54 @@ void SmsConsole::InitializeRam(void* data, uint32_t length)
 	EmuSettings* settings = _emu->GetSettings();
 	RamState ramState = _model == SmsModel::ColecoVision ? settings->GetCvConfig().RamPowerOnState : settings->GetSmsConfig().RamPowerOnState;
 	settings->InitializeRam(ramState, data, length);
+}
+
+void SmsConsole::ProcessNotification(ConsoleNotificationType type, void* parameter)
+{
+	if(type == ConsoleNotificationType::ExecuteShortcut) {
+		ExecuteShortcutParams* params = (ExecuteShortcutParams*)parameter;
+		switch(params->Shortcut) {
+			default: break;
+			case EmulatorShortcut::StartRecordSmsHdPack: StartRecordingHdPack(*(HdPackBuilderOptions*)params->ParamPtr); break;
+			case EmulatorShortcut::StopRecordSmsHdPack: StopRecordingHdPack(); break;
+		}
+	}
+}
+
+void SmsConsole::StartRecordingHdPack(HdPackBuilderOptions options)
+{
+	auto lock = _emu->AcquireLock();
+
+	_emu->GetVideoDecoder()->WaitForAsyncFrameDecode();
+
+	std::stringstream saveState;
+	_emu->Serialize(saveState, false, 0);
+
+	_hdPackBuilder.reset();
+	_hdPackBuilder.reset(new HdPackBuilderSms(_emu, this, options));
+
+	_emu->Deserialize(saveState, SaveStateManager::FileFormatVersion, false);
+	_emu->GetSoundMixer()->StopAudio();
+
+	_emu->GetVideoDecoder()->ForceFilterUpdate();
+}
+
+void SmsConsole::StopRecordingHdPack()
+{
+	if(_hdPackBuilder) {
+		auto lock = _emu->AcquireLock();
+		
+		_emu->GetVideoDecoder()->WaitForAsyncFrameDecode();
+
+		std::stringstream saveState;
+		_emu->Serialize(saveState, false, 0);
+
+		_hdPackBuilder.reset();
+
+		_emu->Deserialize(saveState, SaveStateManager::FileFormatVersion, false);
+		_emu->GetSoundMixer()->StopAudio();
+		_emu->GetVideoDecoder()->ForceFilterUpdate();
+	}
 }
 
 void SmsConsole::Serialize(Serializer& s)

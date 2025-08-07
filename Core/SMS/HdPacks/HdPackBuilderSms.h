@@ -48,6 +48,7 @@ private:
     Emulator* _emu = nullptr;
     SmsConsole* _console = nullptr;
     SmsVdp* _vdp = nullptr;
+    bool _isRecording = false;
     bool _isVram = true;
     string _saveFolder;
     string _romName;
@@ -85,6 +86,12 @@ public:
 
     void ProcessTile(uint32_t cycle, uint32_t scanline, uint32_t tileAddr, HdTileKeySms& tile, 
                     bool isSprite, uint32_t bankHash, bool hasBgSprite);
+    
+    // Recording workflow methods
+    void StartRecording();
+    void StopRecording();
+    bool IsRecording() const { return _isRecording; }
+    void SaveHdPackNow();  // Explicit save method for recording workflow
     
     void SaveHdPack();
     void DumpVramContents(const string& filename);

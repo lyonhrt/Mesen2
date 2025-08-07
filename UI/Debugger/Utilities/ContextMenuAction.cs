@@ -1,4 +1,4 @@
-﻿using Avalonia.Controls;
+using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
@@ -610,6 +610,11 @@ namespace Mesen.Debugger.Utilities
 		InstallHdPack,
 		[IconFile("HdPack")]
 		HdPackBuilder,
+
+		[IconFile("HdPack")]
+		SmsHdPacks,
+		[IconFile("HdPack")]
+		SmsHdPackBuilder,
 
 		[IconFile("LogWindow")]
 		LogWindow,

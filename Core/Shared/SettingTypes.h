@@ -1036,6 +1036,8 @@ enum class EmulatorShortcut
 	StopRecordHdPack,
 
 	//SMS HD Pack
+	StartRecordSmsHdPack,
+	StopRecordSmsHdPack,
 	ToggleSmsHdPack,
 
 	ShortcutCount,

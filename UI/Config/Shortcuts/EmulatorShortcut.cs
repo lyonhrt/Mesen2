@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -142,6 +142,8 @@ namespace Mesen.Config.Shortcuts
 		StopRecordHdPack,
 
 		//SMS HD Pack
+		StartRecordSmsHdPack,
+		StopRecordSmsHdPack,
 		ToggleSmsHdPack,
 
 		LastValidValue = ToggleSmsHdPack,

@@ -1,0 +1,171 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:vm="using:Mesen.ViewModels"
+        xmlns:c="using:Mesen.Controls"
+        xmlns:l="using:Mesen.Localization"
+        mc:Ignorable="d" d:DesignWidth="600" d:DesignHeight="500"
+        x:Class="Mesen.Views.SmsHdPackBuilderWindow"
+        x:DataType="vm:SmsHdPackBuilderViewModel"
+        Title="{l:Translate wndTitle}"
+        Width="600" Height="500"
+        Icon="/Assets/HdPack.png"
+        WindowStartupLocation="CenterOwner">
+
+  <Design.DataContext>
+    <vm:SmsHdPackBuilderViewModel/>
+  </Design.DataContext>
+
+  <Grid Margin="10">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+      <RowDefinition Height="Auto" />
+    </Grid.RowDefinitions>
+
+    <!-- Header -->
+    <StackPanel Grid.Row="0" Margin="0,0,0,10">
+      <TextBlock Text="The SMS HD Pack Builder allows you to record tile usage while playing a game and generate PNG files that can be used to create HD texture packs for SMS/Game Gear/SG-1000 games." 
+                 TextWrapping="Wrap" 
+                 Margin="0,0,0,10" />
+      
+      <Border Background="{DynamicResource SystemControlBackgroundBaseLowBrush}" 
+              BorderBrush="{DynamicResource SystemControlForegroundBaseMediumLowBrush}"
+              BorderThickness="1" 
+              CornerRadius="3" 
+              Padding="10">
+        <TextBlock Text="Important: Start recording, play through the game sections you want to capture, then stop recording. The tool will generate tile sheets and manifest files for HD pack creation." 
+                   TextWrapping="Wrap" 
+                   Foreground="{DynamicResource SystemControlForegroundBaseHighBrush}" />
+      </Border>
+    </StackPanel>
+
+    <!-- Main Content -->
+    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+      <StackPanel Spacing="15">
+        
+        <!-- Save Folder -->
+        <c:GroupBox Header="Save Folder">
+          <Grid>
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*" />
+              <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            
+            <TextBox Grid.Column="0" 
+                     Text="{Binding SaveFolder}" 
+                     IsReadOnly="True" 
+                     Margin="0,0,5,0" />
+            
+            <Button Grid.Column="1" 
+                    Content="Open Save Folder" 
+                    Click="OpenFolder_Click"
+                    IsEnabled="{Binding IsOpenFolderEnabled}" />
+          </Grid>
+        </c:GroupBox>
+
+        <!-- Scale & Filter Options -->
+        <c:GroupBox Header="Scale &amp; Filter Options">
+          <StackPanel Spacing="10">
+            
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+              </Grid.ColumnDefinitions>
+              
+              <TextBlock Grid.Column="0" 
+                         Text="Filter:" 
+                         VerticalAlignment="Center" 
+                         Margin="0,0,10,0" />
+              
+              <ComboBox Grid.Column="1" 
+                        ItemsSource="{Binding Filters}"
+                        SelectedItem="{Binding SelectedFilter}"
+                        IsEnabled="{Binding !IsRecording}" />
+            </Grid>
+
+          </StackPanel>
+        </c:GroupBox>
+
+        <!-- SMS-Specific Options -->
+        <c:GroupBox Header="SMS Options">
+          <StackPanel Spacing="10">
+            
+            <CheckBox Content="Sort tiles by usage frequency" 
+                      IsChecked="{Binding Config.SortByUsageFrequency}"
+                      IsEnabled="{Binding !IsRecording}" />
+            
+            <CheckBox Content="Group blank tiles" 
+                      IsChecked="{Binding Config.GroupBlankTiles}"
+                      IsEnabled="{Binding !IsRecording}" />
+            
+            <CheckBox Content="Ignore tiles at the edges of the screen (overscan)" 
+                      IsChecked="{Binding Config.IgnoreOverscan}"
+                      IsEnabled="{Binding !IsRecording}" />
+
+            <!-- SMS-specific debug options -->
+            <Separator />
+            
+            <CheckBox Content="Debug mode (verbose tile logging)" 
+                      IsChecked="{Binding Config.DebugMode}"
+                      IsEnabled="{Binding !IsRecording}" />
+            
+            <CheckBox Content="Verbose logging" 
+                      IsChecked="{Binding Config.VerboseLogging}"
+                      IsEnabled="{Binding !IsRecording}" />
+            
+            <CheckBox Content="Show palette information" 
+                      IsChecked="{Binding Config.ShowPaletteInfo}"
+                      IsEnabled="{Binding !IsRecording}" />
+
+          </StackPanel>
+        </c:GroupBox>
+
+        <!-- Recording Status -->
+        <c:GroupBox Header="Recording Status">
+          <StackPanel Spacing="10">
+            
+            <TextBlock Text="Click 'Start Recording' to begin capturing tile data, play through your game, then click 'Stop Recording' to generate the HD pack files." 
+                       TextWrapping="Wrap" 
+                       Margin="0,0,0,5" />
+            
+            <StackPanel Orientation="Horizontal" Spacing="10">
+              <Button Content="Start Recording" 
+                      Click="StartRecording_Click"
+                      IsEnabled="{Binding !IsRecording}"
+                      Background="{DynamicResource SystemAccentColor}"
+                      Foreground="White" />
+              
+              <Button Content="Stop Recording" 
+                      Click="StopRecording_Click"
+                      IsEnabled="{Binding IsRecording}"
+                      Background="{DynamicResource SystemControlBackgroundBaseMediumBrush}" />
+            </StackPanel>
+            
+            <TextBlock Text="Recording in progress..." 
+                       Foreground="Red" 
+                       FontWeight="Bold"
+                       IsVisible="{Binding IsRecording}" />
+
+          </StackPanel>
+        </c:GroupBox>
+
+      </StackPanel>
+    </ScrollViewer>
+
+    <!-- Footer -->
+    <StackPanel Grid.Row="2" 
+                Orientation="Horizontal" 
+                HorizontalAlignment="Right" 
+                Spacing="10" 
+                Margin="0,10,0,0">
+      
+      <Button Content="Close" 
+              Click="Close_Click" 
+              IsCancel="True" />
+    </StackPanel>
+
+  </Grid>
+</Window>

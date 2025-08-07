@@ -938,6 +938,22 @@
 			
 			<Control ID="lblSaveTo">Save to:</Control>
 		</Form>
+		<Form ID="SmsHdPackBuilderWindow">
+			<Control ID="wndTitle">SMS HD Pack Builder</Control>
+			
+			<Control ID="grpOptions">Recording Settings</Control>
+			<Control ID="lblScale">Scale/Filter:</Control>
+			<Control ID="chkSortByUsageFrequency">Sort tiles by usage frequency</Control>
+			<Control ID="chkGroupBlankTiles">Group blank tiles</Control>
+			<Control ID="chkIgnoreOverscan">Ignore tiles at the edges of the screen (overscan)</Control>
+			
+			<Control ID="btnStartRecording">Start Recording</Control>
+			<Control ID="btnStopRecording">Stop Recording</Control>
+			<Control ID="btnOpenFolder">Open Save Folder</Control>
+			<Control ID="btnClose">Close</Control>
+			
+			<Control ID="lblSaveTo">Save to:</Control>
+		</Form>
 		<Form ID="InputBarcodeWindow">
 			<Control ID="wndTitle">Input barcode...</Control>
 			<Control ID="lblBarcode">Barcode:</Control>
@@ -3532,6 +3548,8 @@ E
 			<Value ID="HdPacks">HD Packs (NES)</Value>
 			<Value ID="InstallHdPack">Install HD Pack</Value>
 			<Value ID="HdPackBuilder">HD Pack Builder</Value>
+			<Value ID="SmsHdPacks">HD Packs (SMS)</Value>
+			<Value ID="SmsHdPackBuilder">SMS HD Pack Builder</Value>
 			<Value ID="TakeScreenshot">Take Screenshot</Value>
 
 			<Value ID="OnlineHelp">Online Help</Value>

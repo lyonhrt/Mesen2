@@ -1,4 +1,4 @@
-﻿using Avalonia.Controls;
+using Avalonia.Controls;
 using Avalonia.Threading;
 using Mesen.Config;
 using Mesen.Config.Shortcuts;
@@ -9,6 +9,7 @@ using Mesen.Debugger.Windows;
 using Mesen.Interop;
 using Mesen.Localization;
 using Mesen.Utilities;
+using Mesen.Views;
 using Mesen.Windows;
 using ReactiveUI;
 using ReactiveUI.Fody.Helpers;
@@ -777,6 +778,23 @@ namespace Mesen.ViewModels
 							ActionType = ActionType.HdPackBuilder,
 							OnClick = () => {
 								ApplicationHelper.GetOrCreateUniqueWindow(wnd, () => new HdPackBuilderWindow());
+							}
+						}
+					}
+				},
+
+				new ContextMenuSeparator() {
+					IsVisible = () => MainWindow.RomInfo.ConsoleType == ConsoleType.Sms
+				},
+
+				new MainMenuAction() {
+					ActionType = ActionType.SmsHdPacks,
+					IsVisible = () => MainWindow.RomInfo.ConsoleType == ConsoleType.Sms,
+					SubActions = new List<object> {
+						new MainMenuAction() {
+							ActionType = ActionType.SmsHdPackBuilder,
+							OnClick = () => {
+								ApplicationHelper.GetOrCreateUniqueWindow(wnd, () => new SmsHdPackBuilderWindow());
 							}
 						}
 					}

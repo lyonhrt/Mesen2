@@ -40,12 +40,64 @@ HdPackBuilderSms::HdPackBuilderSms(Emulator* emu, SmsConsole* console, HdPackBui
 }
 
 HdPackBuilderSms::~HdPackBuilderSms() {
-    MessageManager::Log("[SMS HD Pack] Destructor called - starting HD pack save process");
+    MessageManager::Log("[SMS HD Pack] Destructor called");
     MessageManager::Log("[SMS HD Pack] Current tile count: " + std::to_string(_hdData.Tiles.size()));
+    
+    // Only save if recording was explicitly stopped or if we have tiles and haven't saved yet
+    if (!_hdPackSaved && !_hdData.Tiles.empty()) {
+        MessageManager::Log("[SMS HD Pack] Auto-saving HD pack data on destruction");
+        SaveHdPack();
+    }
+    
+    MessageManager::Log("[SMS HD Pack] Destructor completed");
+}
+
+void HdPackBuilderSms::StartRecording() {
+    if (_isRecording) {
+        MessageManager::Log("[SMS HD Pack] Recording already in progress");
+        return;
+    }
+    
+    _isRecording = true;
+    _hdPackSaved = false;
+    
+    // Clear any existing tile data to start fresh
+    _hdData.Tiles.clear();
+    _uniqueSpriteCount = 0;
+    _uniqueBgCount = 0;
+    
+    MessageManager::Log("[SMS HD Pack] Started recording tile data");
     MessageManager::Log("[SMS HD Pack] Save folder: " + _saveFolder);
     
-    SaveHdPack();
+    // Update palette for the current game state
+    UpdatePalette();
+}
+
+void HdPackBuilderSms::StopRecording() {
+    if (!_isRecording) {
+        MessageManager::Log("[SMS HD Pack] No recording in progress");
+        return;
+    }
     
+    _isRecording = false;
+    
+    MessageManager::Log("[SMS HD Pack] Stopped recording - saving HD pack data");
+    MessageManager::Log("[SMS HD Pack] Total tiles captured: " + std::to_string(_hdData.Tiles.size()));
+    MessageManager::Log("[SMS HD Pack] Background tiles: " + std::to_string(_uniqueBgCount));
+    MessageManager::Log("[SMS HD Pack] Sprite tiles: " + std::to_string(_uniqueSpriteCount));
+    
+    // Save the HD pack data immediately when recording stops
+    SaveHdPackNow();
+}
+
+void HdPackBuilderSms::SaveHdPackNow() {
+    if (_hdPackSaved) {
+        MessageManager::Log("[SMS HD Pack] HD pack already saved");
+        return;
+    }
+    
+    MessageManager::Log("[SMS HD Pack] Explicitly saving HD pack data");
+    SaveHdPack();
     
     // Generate debug information if requested
     if(_options.DebugMode) {
@@ -56,7 +108,8 @@ HdPackBuilderSms::~HdPackBuilderSms() {
         }
     }
     
-    MessageManager::Log("[SMS HD Pack] Destructor completed");
+    _hdPackSaved = true;
+    MessageManager::Log("[SMS HD Pack] HD pack save completed");
 }
 
 void HdPackBuilderSms::InitializeHdPackData() {
@@ -250,6 +303,11 @@ void HdPackBuilderSms::LogPaletteInfo() {
 
 void HdPackBuilderSms::ProcessTile(uint32_t cycle, uint32_t scanline, uint32_t tileAddr, HdTileKeySms& tile, 
                                     bool isSprite, uint32_t bankHash, bool hasBgSprite) {
+    // Skip if not recording - this ensures tiles are only captured during recording sessions
+    if (!_isRecording) {
+        return;
+    }
+    
     // Skip if VDP is not available
     if(!_vdp) {
         return;

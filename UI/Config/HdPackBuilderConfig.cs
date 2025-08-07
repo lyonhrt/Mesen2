@@ -1,4 +1,4 @@
-﻿using Mesen.Interop;
+using Mesen.Interop;
 using ReactiveUI.Fody.Helpers;
 using System.Runtime.InteropServices;
 using System;
@@ -24,6 +24,35 @@ namespace Mesen.Config
 				Scale = Scale,
 				ChrRamBankSize = ChrRamBankSize,
 				UseLargeSprites = UseLargeSprites,
+				SortByUsageFrequency = SortByUsageFrequency,
+				GroupBlankTiles = GroupBlankTiles,
+				IgnoreOverscan = IgnoreOverscan,
+			};
+		}
+	}
+
+	public class SmsHdPackBuilderConfig : BaseConfig<SmsHdPackBuilderConfig>
+	{
+		public ScaleFilterType FilterType { get; set; } = ScaleFilterType.Prescale;
+		public UInt32 Scale { get; set; } = 1;
+
+		public bool SortByUsageFrequency { get; set; } = true;
+		public bool GroupBlankTiles { get; set; } = true;
+		public bool IgnoreOverscan { get; set; } = false;
+
+		// SMS-specific options
+		public bool DebugMode { get; set; } = false;
+		public bool VerboseLogging { get; set; } = false;
+		public bool ShowPaletteInfo { get; set; } = false;
+
+		public HdPackBuilderOptions ToInterop(string saveFolder)
+		{
+			return new HdPackBuilderOptions() {
+				SaveFolder = saveFolder,
+				FilterType = FilterType,
+				Scale = Scale,
+				ChrRamBankSize = 0x1000, // Not used for SMS
+				UseLargeSprites = false, // SMS doesn't use large sprites like NES
 				SortByUsageFrequency = SortByUsageFrequency,
 				GroupBlankTiles = GroupBlankTiles,
 				IgnoreOverscan = IgnoreOverscan,
