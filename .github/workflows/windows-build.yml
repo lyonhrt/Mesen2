@@ -1,0 +1,36 @@
+name: Windows Build
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 6 SDK
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Setup MSBuild (Visual Studio)
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Restore (solution)
+        run: msbuild Mesen.sln /t:Restore /p:RestorePackagesConfig=true /p:Configuration=Release /p:Platform=x64
+
+      - name: Build (Release|x64)
+        run: msbuild Mesen.sln /m /p:Configuration=Release /p:Platform=x64 /p:PreferredToolArchitecture=x64 /verbosity:minimal
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mesen2-win-x64-Release
+          path: |
+            bin/win-x64/Release/**/*
+          if-no-files-found: warn
