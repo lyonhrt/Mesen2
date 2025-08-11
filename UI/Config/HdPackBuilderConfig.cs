@@ -39,6 +39,7 @@ namespace Mesen.Config
 		public bool SortByUsageFrequency { get; set; } = true;
 		public bool GroupBlankTiles { get; set; } = true;
 		public bool IgnoreOverscan { get; set; } = false;
+		public bool GroupRelatedSpriteTiles { get; set; } = false;
 
 		// SMS-specific options
 		public bool DebugMode { get; set; } = false;
@@ -56,6 +57,7 @@ namespace Mesen.Config
 				SortByUsageFrequency = SortByUsageFrequency,
 				GroupBlankTiles = GroupBlankTiles,
 				IgnoreOverscan = IgnoreOverscan,
+				GroupRelatedSpriteTiles = GroupRelatedSpriteTiles,
 			};
 		}
 	}
@@ -83,5 +85,6 @@ namespace Mesen.Config
 		[MarshalAs(UnmanagedType.I1)] public bool SortByUsageFrequency;
 		[MarshalAs(UnmanagedType.I1)] public bool GroupBlankTiles;
 		[MarshalAs(UnmanagedType.I1)] public bool IgnoreOverscan;
+		[MarshalAs(UnmanagedType.I1)] public bool GroupRelatedSpriteTiles;
 	}
 }

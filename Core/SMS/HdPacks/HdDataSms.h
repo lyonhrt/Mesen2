@@ -11,24 +11,21 @@ struct HdTileKeySms {
     uint32_t PaletteColors = 0;
     uint8_t TileData[32] = {}; // SMS tiles are 8x8 with 32 bytes (4 bitplanes * 8 rows)
     bool IsVramTile = false;
+    bool IsSprite = false;
+    
+    static inline uint8_t NormalizePaletteIndex(uint32_t paletteColors) {
+        // SmsVdp encodes palette selection into color bits for debugging.
+        // Normalize to palette index: 0 for low palette, 1 for high palette.
+        return (((paletteColors >> 16) & 0xFF) ? 1 : 0);
+    }
 
     bool operator==(const HdTileKeySms& other) const {
-        // Always compare the first 4 bytes of TileData which contains the visual hash
-        // This ensures visually identical tiles are considered equal
-        uint32_t thisHash, otherHash;
-        memcpy(&thisHash, TileData, sizeof(thisHash));
-        memcpy(&otherHash, other.TileData, sizeof(otherHash));
-        
-        // If visual hashes match, consider the tiles equal
-        if (thisHash == otherHash && PaletteColors == other.PaletteColors) {
-            return true;
-        }
-        
-        // Fall back to traditional comparison for VRAM tiles
-        if(IsVramTile) {
-            return memcmp(TileData, other.TileData, sizeof(TileData)) == 0 && PaletteColors == other.PaletteColors;
+        uint8_t thisPal = NormalizePaletteIndex(PaletteColors);
+        uint8_t otherPal = NormalizePaletteIndex(other.PaletteColors);
+        if(IsVramTile || other.IsVramTile) {
+            return thisPal == otherPal && IsSprite == other.IsSprite && memcmp(TileData, other.TileData, sizeof(TileData)) == 0;
         } else {
-            return TileIndex == other.TileIndex && PaletteColors == other.PaletteColors;
+            return TileIndex == other.TileIndex && thisPal == otherPal && IsSprite == other.IsSprite;
         }
     }
 };
@@ -36,15 +33,23 @@ struct HdTileKeySms {
 namespace std {
     template<> struct hash<HdTileKeySms> {
         size_t operator()(const HdTileKeySms& key) const {
+            auto combine = [](size_t& seed, size_t value) {
+                seed ^= value + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+            };
+
+            size_t h = 0;
             if(key.IsVramTile) {
-                size_t hash = key.PaletteColors;
                 for(int i = 0; i < 32; i++) {
-                    hash ^= key.TileData[i] + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+                    combine(h, static_cast<size_t>(key.TileData[i]));
                 }
-                return hash;
             } else {
-                return (size_t)key.TileIndex ^ ((size_t)key.PaletteColors << 16);
+                combine(h, static_cast<size_t>(key.TileIndex));
             }
+
+            // Normalize palette index (0 or 1) for stability, then include sprite/background distinction
+            combine(h, static_cast<size_t>(HdTileKeySms::NormalizePaletteIndex(key.PaletteColors)));
+            combine(h, static_cast<size_t>(key.IsSprite ? 1 : 0));
+            return h;
         }
     };
 }
@@ -77,9 +82,9 @@ struct HdPackTileInfoSms : public HdTileKeySms {
     uint32_t Width = 8;
     uint32_t Height = 8;
     uint32_t Brightness = 255;
+    uint32_t UsageCount = 0; // Total times this tile was encountered (for ordering)
     bool DefaultTile = false;
     bool ForceDisableCache = false;
-    bool IsSprite = false;  // Added for SMS sprite/background distinction
     bool HorizontalMirroring = false; // Added for SMS HD pack conditions
     bool VerticalMirroring = false;   // Added for SMS HD pack conditions
     bool BackgroundPriority = false;  // Added for SMS HD pack conditions

@@ -18,6 +18,7 @@
 #include <fstream>
 #include <set>
 #include <fstream>
+#include <unordered_set>
 
 HdPackBuilderSms::HdPackBuilderSms(Emulator* emu, SmsConsole* console, HdPackBuilderOptions options) {
     _emu = emu;
@@ -37,6 +38,117 @@ HdPackBuilderSms::HdPackBuilderSms(Emulator* emu, SmsConsole* console, HdPackBui
     
     // Log initialization information
     LogInitializationInfo();
+}
+
+// Frame boundary detection and co-occurrence accumulation
+void HdPackBuilderSms::ResetFrameIfNeeded(uint32_t scanline)
+{
+    if(_lastScanline == -1) {
+        _lastScanline = (int)scanline;
+        return;
+    }
+
+    if((int)scanline < _lastScanline) {
+        // New frame detected: accumulate co-occurrence for sprites seen in the previous frame
+        const int closeThresh = 16; // pixels, roughly 2 tiles
+        for(size_t i = 0; i < _currentFrameSpriteOccurrences.size(); i++) {
+            HdPackTileInfoSms* a = _currentFrameSpriteOccurrences[i].Tile;
+            if(!a) continue;
+            for(size_t j = i + 1; j < _currentFrameSpriteOccurrences.size(); j++) {
+                HdPackTileInfoSms* b = _currentFrameSpriteOccurrences[j].Tile;
+                if(!b || a == b) continue;
+                int dx = std::abs((int)_currentFrameSpriteOccurrences[i].X - (int)_currentFrameSpriteOccurrences[j].X);
+                int dy = std::abs((int)_currentFrameSpriteOccurrences[i].Y - (int)_currentFrameSpriteOccurrences[j].Y);
+                int md = std::max(dx, dy);
+                if(md <= closeThresh) {
+                    uint32_t weight = (md <= 8 ? 3u : (md <= 16 ? 2u : 1u));
+                    _spriteCoOccurMap[a][b] += weight;
+                    _spriteCoOccurMap[b][a] += weight;
+                }
+            }
+        }
+        _currentFrameSpriteOccurrences.clear();
+    }
+    _lastScanline = (int)scanline;
+}
+
+void HdPackBuilderSms::NoteSpriteOccurrence(HdPackTileInfoSms* tile, uint32_t x, uint32_t y)
+{
+    if(!tile) return;
+    SpriteOccurrence occ { tile, (uint16_t)x, (uint16_t)y };
+    _currentFrameSpriteOccurrences.push_back(occ);
+}
+
+// Reorder sprites so that strongly co-occurring tiles are grouped contiguously.
+std::vector<HdPackTileInfoSms*> HdPackBuilderSms::ApplySpriteGrouping(const std::vector<HdPackTileInfoSms*>& input)
+{
+    std::vector<HdPackTileInfoSms*> output;
+    output.reserve(input.size());
+    if(input.empty()) return output;
+
+    // Build a quick lookup set for membership tests
+    std::unordered_set<HdPackTileInfoSms*> inSet;
+    inSet.reserve(input.size()*2);
+    for(auto* t : input) { if(t) inSet.insert(t); }
+
+    std::unordered_set<HdPackTileInfoSms*> visited;
+    visited.reserve(input.size()*2);
+
+    // Minimum strength to consider 2 tiles related
+    const uint32_t minStrength = 2;
+
+    for(HdPackTileInfoSms* seed : input) {
+        if(!seed || visited.count(seed)) continue;
+
+        // Grow a group from this seed using a greedy BFS by co-occurrence strength
+        std::vector<HdPackTileInfoSms*> queue;
+        queue.push_back(seed);
+        visited.insert(seed);
+
+        while(!queue.empty()) {
+            HdPackTileInfoSms* cur = queue.back();
+            queue.pop_back();
+            output.push_back(cur);
+
+            auto it = _spriteCoOccurMap.find(cur);
+            if(it == _spriteCoOccurMap.end()) continue;
+
+            // Collect eligible neighbors
+            std::vector<std::pair<HdPackTileInfoSms*, uint32_t>> neighbors;
+            neighbors.reserve(it->second.size());
+            for(const auto& kv : it->second) {
+                HdPackTileInfoSms* nb = kv.first;
+                uint32_t weight = kv.second;
+                if(!nb || !inSet.count(nb) || visited.count(nb)) continue;
+                if(weight >= minStrength) {
+                    neighbors.emplace_back(nb, weight);
+                }
+            }
+
+            // Sort neighbors by strength (desc), fallback to usage count (desc)
+            std::sort(neighbors.begin(), neighbors.end(), [](const auto& a, const auto& b){
+                if(a.second != b.second) return a.second > b.second;
+                // Prefer tiles seen more often
+                return (a.first->UsageCount) > (b.first->UsageCount);
+            });
+
+            for(const auto& p : neighbors) {
+                HdPackTileInfoSms* nb = p.first;
+                if(!visited.count(nb)) {
+                    visited.insert(nb);
+                    queue.push_back(nb);
+                }
+            }
+        }
+    }
+
+    // If anything was skipped (e.g., no co-occurrence data), append it in original order
+    for(HdPackTileInfoSms* t : input) {
+        if(t && !std::count(output.begin(), output.end(), t)) {
+            output.push_back(t);
+        }
+    }
+    return output;
 }
 
 HdPackBuilderSms::~HdPackBuilderSms() {
@@ -313,6 +425,9 @@ void HdPackBuilderSms::ProcessTile(uint32_t cycle, uint32_t scanline, uint32_t t
         return;
     }
     
+    // Detect frame boundaries and accumulate co-occurrence data on wrap
+    ResetFrameIfNeeded(scanline);
+    
     // Track total tile counts
     if(isSprite) {
         _totalSpriteCount++;
@@ -385,6 +500,8 @@ void HdPackBuilderSms::ProcessTile(uint32_t cycle, uint32_t scanline, uint32_t t
             MessageManager::Log(ss.str());
         }
         
+        // Initialize per-tile usage count for ordering/sorting
+        hdTile->UsageCount = _tileUsageCount[tile];
         _tilesByKey[tile] = hdTile;
         _hdData.Tiles.push_back(unique_ptr<HdPackTileInfoSms>(hdTile));
         
@@ -399,12 +516,28 @@ void HdPackBuilderSms::ProcessTile(uint32_t cycle, uint32_t scanline, uint32_t t
         // Generate the HD tile image
         GenerateHdTile(hdTile);
         
+        // Track sprite occurrence within the current frame for grouping
+        if(isSprite) {
+            NoteSpriteOccurrence(hdTile, cycle, scanline);
+        }
+
         if(_options.DebugMode) {
             MessageManager::Log("[SMS HD Pack] DEBUG: Tile processing completed successfully");
         }
-    } else if(_options.DebugMode) {
-        MessageManager::Log("[SMS HD Pack] DEBUG: Tile already exists, usage count: " + 
-                          std::to_string(_tileUsageCount[tile]));
+    } else {
+        // Update existing tile's usage for ordering
+        if(existingTile->second) {
+            existingTile->second->UsageCount = _tileUsageCount[tile];
+        }
+        if(_options.DebugMode) {
+            MessageManager::Log("[SMS HD Pack] DEBUG: Tile already exists, usage count: " + 
+                              std::to_string(_tileUsageCount[tile]));
+        }
+
+        // Track sprite occurrence within the current frame for grouping
+        if(isSprite && existingTile->second) {
+            NoteSpriteOccurrence(existingTile->second, cycle, scanline);
+        }
     }
 }
 
@@ -419,41 +552,21 @@ void HdPackBuilderSms::AddTile(HdPackTileInfoSms* tile, uint32_t usageCount) {
         this->GenerateHdTile(tile);
     }
     
-    // Create a custom key based on the visual appearance
-    std::string visualKey;
-    
-    // First, add the raw tile data to the key
-    for(int i = 0; i < SmsHdPackConstants::SMS_TILE_DATA_SIZE; i++) {
-        visualKey += std::to_string(tile->TileData[i]) + ",";
-    }
-    
-    // Add palette information
-    visualKey += "P" + std::to_string(tile->PaletteColors) + ",";
-    
-    // Add sprite/background flag
-    visualKey += tile->IsSprite ? "S," : "B,";
-    
-    // Calculate a hash of the visual key
-    std::hash<std::string> hasher;
-    uint32_t visualHash = static_cast<uint32_t>(hasher(visualKey));
-    
-    // Create a tile key for tracking usage
+    // Build the key directly from raw tile data and normalized palette/sprite flags
     HdTileKeySms tileKey;
-    // Copy relevant data from tile to create the key
     tileKey.TileIndex = tile->TileIndex;
     tileKey.PaletteColors = tile->PaletteColors;
-    
-    // Store visual hash in the first 4 bytes of TileData for deduplication purposes
-    memcpy(tileKey.TileData, &visualHash, sizeof(visualHash));
-    
-    // Set IsVramTile to true to force using TileData comparison in operator==
     tileKey.IsVramTile = true;
+    tileKey.IsSprite = tile->IsSprite;
+    memcpy(tileKey.TileData, tile->TileData, SmsHdPackConstants::SMS_TILE_DATA_SIZE);
     
     // Check if we already have this tile
     auto existingTile = _tilesByKey.find(tileKey);
     if(existingTile == _tilesByKey.end()) {
         // Create a unique_ptr for the tile and add it to the collection
         auto tilePtr = std::make_unique<HdPackTileInfoSms>(*tile);
+        // Initialize per-tile usage count (used for ordering)
+        tilePtr->UsageCount = usageCount;
         
         // Update usage count using the correct key type
         _tileUsageCount[tileKey] = usageCount;
@@ -476,6 +589,10 @@ void HdPackBuilderSms::AddTile(HdPackTileInfoSms* tile, uint32_t usageCount) {
     } else {
         // Just update the usage count for existing tiles
         _tileUsageCount[tileKey] += usageCount;
+        if(existingTile->second) {
+            // Keep the per-tile usage in sync for ordering
+            existingTile->second->UsageCount = _tileUsageCount[tileKey];
+        }
         
         // Update the screen position if this is a better instance
         if(existingTile->second) {
@@ -1574,31 +1691,41 @@ void HdPackBuilderSms::SaveHdPack()
     
     MessageManager::Log("[SMS HD Pack] Separated tiles: " + std::to_string(bgTiles.size()) + 
                        " background tiles, " + std::to_string(spriteTiles.size()) + " sprite tiles");
-    
-    // Process background tiles in chunks of 256 (16x16 grid)
-    vector<string> tileSheets;
-    
-    // Save background tiles
-    for(size_t i = 0; i < bgTiles.size(); i += 256) {
-        size_t count = std::min((size_t)256, bgTiles.size() - i);
-        std::vector<HdPackTileInfoSms*> sheetTiles;
-        
-        // Extract pointers for this chunk
-        for(size_t j = 0; j < count; j++) {
-            sheetTiles.push_back(bgTiles[i + j]);
-        }
-                
-        // Generate descriptive sheet filename for background tiles
-        std::stringstream ss;
-        ss << "BGTILES_" << std::setw(3) << std::setfill('0') << i/256 << ".png";
-        std::string sheetName = ss.str();
-                
-        // Save the background tile sheet
-        SaveTileSheet(sheetTiles, _saveFolder, sheetName, false);
-        tileSheets.push_back(sheetName);
+
+    // Optional: sort tiles by usage frequency (player sprites should surface first)
+    if(_options.SortByUsageFrequency) {
+        auto byUsageDesc = [](HdPackTileInfoSms* a, HdPackTileInfoSms* b) {
+            if(a && b) {
+                if(a->UsageCount != b->UsageCount) {
+                    return a->UsageCount > b->UsageCount;
+                }
+                // Stable fallback: prefer sprites first when counts are equal
+                if(a->IsSprite != b->IsSprite) {
+                    return a->IsSprite && !b->IsSprite;
+                }
+                return false;
+            }
+            // Non-null comes before null
+            return a != nullptr;
+        };
+        std::stable_sort(bgTiles.begin(), bgTiles.end(), byUsageDesc);
+        std::stable_sort(spriteTiles.begin(), spriteTiles.end(), byUsageDesc);
     }
     
-    // Save sprite tiles
+    // Optional: group related sprite tiles (metasprite clusters) contiguously
+    if(_options.GroupRelatedSpriteTiles) {
+        // Flush any pending occurrences into the co-occurrence map
+        if(_lastScanline >= 0) {
+            // Force a frame wrap to trigger flush
+            ResetFrameIfNeeded(0);
+        }
+        spriteTiles = ApplySpriteGrouping(spriteTiles);
+    }
+    
+    // Process tiles in chunks of 256 (16x16 grid)
+    vector<string> tileSheets;
+
+    // Save sprite tiles FIRST so player sprites appear early like NES dumps
     for(size_t i = 0; i < spriteTiles.size(); i += 256) {
         size_t count = std::min((size_t)256, spriteTiles.size() - i);
         std::vector<HdPackTileInfoSms*> sheetTiles;
@@ -1615,6 +1742,26 @@ void HdPackBuilderSms::SaveHdPack()
                 
         // Save the sprite tile sheet
         SaveTileSheet(sheetTiles, _saveFolder, sheetName, true);
+        tileSheets.push_back(sheetName);
+    }
+
+    // Then save background tiles
+    for(size_t i = 0; i < bgTiles.size(); i += 256) {
+        size_t count = std::min((size_t)256, bgTiles.size() - i);
+        std::vector<HdPackTileInfoSms*> sheetTiles;
+        
+        // Extract pointers for this chunk
+        for(size_t j = 0; j < count; j++) {
+            sheetTiles.push_back(bgTiles[i + j]);
+        }
+                
+        // Generate descriptive sheet filename for background tiles
+        std::stringstream ss;
+        ss << "BGTILES_" << std::setw(3) << std::setfill('0') << i/256 << ".png";
+        std::string sheetName = ss.str();
+                
+        // Save the background tile sheet
+        SaveTileSheet(sheetTiles, _saveFolder, sheetName, false);
         tileSheets.push_back(sheetName);
     }
     

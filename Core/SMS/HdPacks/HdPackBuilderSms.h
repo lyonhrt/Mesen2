@@ -29,6 +29,7 @@ struct HdPackBuilderOptions {
     uint32_t VramBankSize = 0x1000;
     bool GroupBlankTiles = false;
     bool SortByUsageFrequency = false;
+    bool GroupRelatedSpriteTiles = false; // Group related sprite tiles contiguously in sheets
     bool IgnoreOverscan = false;
     bool DebugMode = false;            // Enable debug visualization
     bool UseActualPalette = true;      // Use actual SMS palette colors
@@ -63,6 +64,19 @@ private:
     uint32_t _palette[SmsHdPackConstants::SMS_PALETTE_SIZE] = {}; // Full SMS palette
     uint32_t _spritePalette[SmsHdPackConstants::SMS_SPRITE_PALETTE_SIZE] = {}; // Sprite palette
     uint32_t _bgPalette[SmsHdPackConstants::SMS_BG_PALETTE_SIZE] = {};     // Background palette
+
+    // Co-occurrence tracking for sprite grouping
+    struct SpriteOccurrence {
+        HdPackTileInfoSms* Tile;
+        uint16_t X;
+        uint16_t Y;
+    };
+    // Sprite occurrences observed within the current frame
+    std::vector<SpriteOccurrence> _currentFrameSpriteOccurrences;
+    // Simple frame tracking using scanline wrap-around
+    int _lastScanline = -1;
+    // Symmetric co-occurrence graph between sprite tiles
+    std::unordered_map<HdPackTileInfoSms*, std::unordered_map<HdPackTileInfoSms*, uint32_t>> _spriteCoOccurMap;
     
     // Private utility methods for better modularity
     void InitializeHdPackData();
@@ -137,6 +151,11 @@ private:
     void GroupRelatedTiles(std::vector<HdPackTileInfoSms*>& tiles, std::vector<std::vector<HdPackTileInfoSms*>>& groupedTiles, bool useCache);
     void VerifyPaletteUsage(HdPackTileInfoSms* tile, uint8_t* paletteRam);
     string CleanFilename(const string& filename);  // Helper for sanitizing filenames
+
+    // Sprite grouping helpers
+    void NoteSpriteOccurrence(HdPackTileInfoSms* tile, uint32_t x, uint32_t y);
+    void ResetFrameIfNeeded(uint32_t scanline);
+    std::vector<HdPackTileInfoSms*> ApplySpriteGrouping(const std::vector<HdPackTileInfoSms*>& input);
     
     // Palette and debugging functions
     void UpdatePalette();  // Update palette data from VDP

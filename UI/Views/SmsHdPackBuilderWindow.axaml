@@ -101,6 +101,10 @@
                       IsChecked="{Binding Config.GroupBlankTiles}"
                       IsEnabled="{Binding !IsRecording}" />
             
+            <CheckBox Content="Group related sprite tiles (metasprites)" 
+                      IsChecked="{Binding Config.GroupRelatedSpriteTiles}"
+                      IsEnabled="{Binding !IsRecording}" />
+
             <CheckBox Content="Ignore tiles at the edges of the screen (overscan)" 
                       IsChecked="{Binding Config.IgnoreOverscan}"
                       IsEnabled="{Binding !IsRecording}" />

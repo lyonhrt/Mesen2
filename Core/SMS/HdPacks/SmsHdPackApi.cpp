@@ -54,55 +54,20 @@ namespace SmsHdPackApi {
         return clean;
     }
 
-    // Auto-start function called when SMS game is loaded
+    // Auto-start hook when an SMS game is loaded (no longer auto-starts dumping; waits for explicit Start Recording)
     void AutoStartOnGameLoaded(Emulator* emu) {
         if(emu->GetConsoleType() != ConsoleType::Sms) {
             return;
         }
         
-        if(g_isDumping) {
-            return; // Already dumping
-        }
-        
-        // Check if HD tile dumping is enabled in settings
+        // Sync dumper enable flag from settings, but do not start recording automatically
         SmsConfig& smsConfig = emu->GetSettings()->GetSmsConfig();
         SmsHdTileDumper::SetDumpingEnabled(smsConfig.EnableHdTileDumping);
         
-        // Set up HD pack builder options for SMS
-        HdPackBuilderOptions options = {};
+        // Ensure we're not considered dumping until the user explicitly starts it
+        g_isDumping = false;
         
-        string hdPackFolder = FolderUtilities::GetHdPackFolder();
-        RomInfo romInfo = emu->GetRomInfo();
-        string romName = FolderUtilities::GetFilename(romInfo.RomFile.GetFileName(), false);
-        string cleanRomName = SanitizeRomName(romName);
-        string saveFolder = FolderUtilities::CombinePath(hdPackFolder, cleanRomName);
-        
-        options.SaveFolder = saveFolder;
-        options.Scale = 1;
-        options.VramBankSize = 0x1000;
-        options.GroupBlankTiles = true;
-        options.SortByUsageFrequency = false;
-        options.IgnoreOverscan = false;
-        
-        // Get the SMS console
-        auto console = emu->GetConsole();
-        SmsConsole* smsConsole = static_cast<SmsConsole*>(console.get());
-        
-        // Create the HD pack builder
-        g_hdPackBuilder = std::make_unique<HdPackBuilderSms>(emu, smsConsole, options);
-        
-        // Create the HD tile dumper if enabled
-        if(SmsHdTileDumper::IsDumpingEnabled()) {
-            g_hdTileDumper = std::make_unique<SmsHdTileDumper>(emu, romInfo.RomFile.GetSha1Hash());
-            g_hdTileDumper->Initialize(saveFolder);
-            MessageManager::Log("[SMS HD Tile] Initialized tile dumper for: " + romName);
-            MessageManager::Log("[SMS HD Tile] Will save to: " + saveFolder);
-        }
-        
-        g_isDumping = true;
-        
-        MessageManager::Log("[SMS HD Pack] Auto-started tile dumping for: " + romName);
-        MessageManager::Log("[SMS HD Pack] Will save to: " + saveFolder);
+        MessageManager::Log("[SMS HD Pack] Ready. Use Start Recording to begin tile dumping.");
     }
 
     // Save and stop dumping when the game is powered off
@@ -128,6 +93,55 @@ namespace SmsHdPackApi {
         g_isDumping = false;
     }
 
+    // Explicit start recording entry point (called from UI shortcut)
+    void StartRecording(Emulator* emu, HdPackBuilderOptions options) {
+        if(emu->GetConsoleType() != ConsoleType::Sms) {
+            return;
+        }
+        
+        // Create builder if needed
+        if(!g_hdPackBuilder) {
+            auto console = emu->GetConsole();
+            SmsConsole* smsConsole = static_cast<SmsConsole*>(console.get());
+            g_hdPackBuilder = std::make_unique<HdPackBuilderSms>(emu, smsConsole, options);
+        }
+        
+        // Initialize tile dumper if enabled and not created yet
+        if(SmsHdTileDumper::IsDumpingEnabled() && !g_hdTileDumper) {
+            RomInfo romInfo = emu->GetRomInfo();
+            g_hdTileDumper = std::make_unique<SmsHdTileDumper>(emu, romInfo.RomFile.GetSha1Hash());
+            g_hdTileDumper->Initialize(options.SaveFolder);
+        }
+        
+        // Ensure builder is actively recording
+        if(!g_hdPackBuilder->IsRecording()) {
+            g_hdPackBuilder->StartRecording();
+        }
+        
+        g_isDumping = true;
+        
+        MessageManager::Log("[SMS HD Pack] Recording started. Saving to: " + options.SaveFolder);
+    }
+
+    // Explicit stop recording entry point (called from UI shortcut)
+    void StopRecording(Emulator* emu) {
+        if(!g_isDumping) {
+            return;
+        }
+        
+        if(g_hdPackBuilder) {
+            g_hdPackBuilder->StopRecording();
+            g_hdPackBuilder.reset();
+        }
+        if(g_hdTileDumper) {
+            g_hdTileDumper->SaveManifest();
+            g_hdTileDumper.reset();
+        }
+        
+        g_isDumping = false;
+        MessageManager::Log("[SMS HD Pack] Recording stopped.");
+    }
+
     // Function to be called from SMS VDP during tile rendering
     void ProcessSmsBackgroundTile(Emulator* emu, uint32_t x, uint32_t y, uint32_t tileAddr, 
                                  uint8_t* tileData, uint32_t paletteColors, bool hMirror, bool vMirror, bool priority) {
@@ -142,6 +156,7 @@ namespace SmsHdPackApi {
             HdTileKeySms tileKey = {};
             tileKey.TileIndex = tileAddr / 32;
             tileKey.IsVramTile = true;
+            tileKey.IsSprite = false;
             tileKey.PaletteColors = paletteColors;
             
             // Copy the 32-byte SMS tile data
@@ -175,6 +190,7 @@ namespace SmsHdPackApi {
             HdTileKeySms tileKey = {};
             tileKey.TileIndex = tileAddr / 32;
             tileKey.IsVramTile = true;
+            tileKey.IsSprite = true;
             tileKey.PaletteColors = paletteColors;
             
             // Copy the 32-byte SMS tile data

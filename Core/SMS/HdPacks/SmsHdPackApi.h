@@ -3,6 +3,7 @@
 
 class Emulator;
 class SmsConsole;
+struct HdPackBuilderOptions;
 
 // Simple API for SMS HD pack dumping - auto-start and save on power-off
 namespace SmsHdPackApi {
@@ -11,6 +12,10 @@ namespace SmsHdPackApi {
     
     // Save and stop dumping when the game is powered off
     void SaveOnPowerOff(Emulator* emu);
+    
+    // Explicit start/stop recording controls (called by Start/Stop Recording shortcuts)
+    void StartRecording(Emulator* emu, HdPackBuilderOptions options);
+    void StopRecording(Emulator* emu);
     
     // Real VDP integration functions - called from SmsVdp during rendering
     void ProcessSmsBackgroundTile(Emulator* emu, uint32_t x, uint32_t y, uint32_t tileAddr, 
