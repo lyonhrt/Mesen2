@@ -19,6 +19,10 @@
 #include <set>
 #include <fstream>
 #include <unordered_set>
+#include <unordered_map>
+
+// Optional debug logging helpers (no-op unless SMS_HD_DEBUG is defined)
+#include "SMS/HdPacks/HdPackDebug.h"
 
 HdPackBuilderSms::HdPackBuilderSms(Emulator* emu, SmsConsole* console, HdPackBuilderOptions options) {
     _emu = emu;
@@ -32,12 +36,254 @@ HdPackBuilderSms::HdPackBuilderSms(Emulator* emu, SmsConsole* console, HdPackBui
     RomInfo romInfo = _emu->GetRomInfo();
     _romName = FolderUtilities::GetFilename(romInfo.RomFile.GetFileName(), false);
     
+    // If an existing hires.txt defines a <scale>, override _options.Scale before initializing data
+    TryOverrideScaleFromExistingManifest();
+    
     // Initialize HD pack data and palette
     InitializeHdPackData();
     UpdatePalette();
     
     // Log initialization information
     LogInitializationInfo();
+}
+
+void HdPackBuilderSms::TryOverrideScaleFromExistingManifest()
+{
+    try {
+        string manifestPath = FolderUtilities::CombinePath(_saveFolder, "hires.txt");
+        std::ifstream in(manifestPath);
+        if(!in.is_open()) {
+            return;
+        }
+        std::string line;
+        int parsedScale = -1;
+        while(std::getline(in, line)) {
+            // Trim leading spaces
+            size_t start = line.find_first_not_of(" \t");
+            if(start == std::string::npos) continue;
+            if(line.compare(start, 7, "<scale>") == 0) {
+                std::string rest = line.substr(start + 7);
+                // Stop at next '<' if present (supports <scale>4</scale>)
+                size_t lt = rest.find('<');
+                if(lt != std::string::npos) rest = rest.substr(0, lt);
+                // Trim whitespace
+                size_t s = rest.find_first_not_of(" \t");
+                if(s != std::string::npos) rest = rest.substr(s);
+                size_t e = rest.find_last_not_of(" \t\r\n");
+                if(e != std::string::npos) rest = rest.substr(0, e + 1);
+                try {
+                    int val = std::stoi(rest);
+                    if(val >= 1 && val <= 10) {
+                        parsedScale = val;
+                    }
+                } catch(...) {
+                    // ignore parse failure
+                }
+                break;
+            }
+        }
+        in.close();
+        if(parsedScale > 0) {
+            if((int)_options.Scale != parsedScale) {
+                MessageManager::Log("[SMS HD Pack] Using scale from existing hires.txt: " + std::to_string(parsedScale));
+            }
+            _options.Scale = (uint32_t)parsedScale;
+            // If _hdData has already been set, mirror it (constructor calls before init, so this is just in case)
+            _hdData.Scale = _options.Scale;
+        }
+    } catch(...) {
+        // Ignore errors
+    }
+}
+
+void HdPackBuilderSms::ValidateHdNesManifestFile(const string& manifestPath)
+{
+    std::ifstream in(manifestPath);
+    if(!in.is_open()) {
+        MessageManager::Log("[SMS HD Pack] Manifest validation: cannot open file: " + manifestPath);
+        return;
+    }
+
+    std::string line;
+    bool hasVer = false, hasScale = false, hasRom = false;
+    std::vector<std::string> imgs;
+    int lineNum = 0;
+    std::string romShaInFile;
+    while(std::getline(in, line)) {
+        lineNum++;
+        if(line.rfind("<ver>", 0) == 0) {
+            hasVer = true;
+        } else if(line.rfind("<scale>", 0) == 0) {
+            hasScale = true;
+        } else if(line.rfind("<supportedRom>", 0) == 0) {
+            hasRom = true;
+            std::string sha = line.substr(std::string("<supportedRom>").size());
+            // Trim spaces
+            sha.erase(0, sha.find_first_not_of(" \t"));
+            sha.erase(sha.find_last_not_of(" \t\r\n") + 1);
+            romShaInFile = sha;
+            if(sha.size() != 40) {
+                MessageManager::Log("[SMS HD Pack] Manifest validation: WARNING - SHA1 length is not 40: '" + sha + "'");
+            }
+        } else if(line.rfind("<img>", 0) == 0) {
+            std::string fn = line.substr(5);
+            fn.erase(0, fn.find_first_not_of(" \t"));
+            fn.erase(fn.find_last_not_of(" \t\r\n") + 1);
+            imgs.push_back(fn);
+        }
+    }
+    in.close();
+
+    if(!hasVer)  MessageManager::Log("[SMS HD Pack] Manifest validation: Missing <ver> tag");
+    if(!hasScale)MessageManager::Log("[SMS HD Pack] Manifest validation: Missing <scale> tag");
+    if(!hasRom)  MessageManager::Log("[SMS HD Pack] Manifest validation: Missing <supportedRom> tag");
+
+    // Verify ROM SHA1 matches actual ROM file
+    if(!romShaInFile.empty()) {
+        std::string actualSha = _emu->GetRomInfo().RomFile.GetSha1Hash();
+        for(char& c : actualSha) { c = (char)toupper((unsigned char)c); }
+        if(actualSha != romShaInFile) {
+            MessageManager::Log("[SMS HD Pack] Manifest validation: WARNING - supportedRom does not match current ROM SHA1");
+            HDLOG_TAG("Manifest", "supportedRom=" + romShaInFile + ", actual=" + actualSha);
+        }
+    }
+
+    // Check that all referenced images exist on disk
+    int missing = 0;
+    for(const std::string& img : imgs) {
+        std::error_code ec;
+        std::string full = FolderUtilities::CombinePath(_saveFolder, img);
+        bool exists = std::filesystem::exists(std::filesystem::u8path(full), ec);
+        if(!exists) {
+            missing++;
+            MessageManager::Log("[SMS HD Pack] Manifest validation: Missing PNG referenced by <img>: " + img);
+        }
+    }
+
+    // Parse <tile> lines and validate field format and ranges
+    std::ifstream in2(manifestPath);
+    bool hasTile = false;
+    int badTile = 0;
+    const int tileSize = 8 * (int)_hdData.Scale;
+    const int sheetWidth = 16 * tileSize;
+    const int sheetHeight = 16 * tileSize;
+    while(std::getline(in2, line)) {
+        if(line.rfind("<tile>", 0) == 0) {
+            hasTile = true;
+            std::string rest = line.substr(6);
+            // split by ','
+            std::vector<std::string> parts;
+            std::stringstream ss(rest);
+            std::string item;
+            while(std::getline(ss, item, ',')) {
+                // trim
+                item.erase(0, item.find_first_not_of(" \t"));
+                item.erase(item.find_last_not_of(" \t\r\n") + 1);
+                parts.push_back(item);
+            }
+            if(parts.size() < 7) { badTile++; continue; }
+            // imgIndex
+            int imgIdx = -1; try { imgIdx = std::stoi(parts[0]); } catch(...) { badTile++; continue; }
+            if(imgIdx < 0 || imgIdx >= (int)imgs.size()) { badTile++; continue; }
+            // tileDataHex: non-empty hex (we won't enforce length here)
+            if(parts[1].empty()) { badTile++; continue; }
+            // paletteHex: must be 8 hex digits
+            if(parts[2].size() != 8) { badTile++; continue; }
+            // x,y
+            int x=-1,y=-1; try { x = std::stoi(parts[3]); y = std::stoi(parts[4]); } catch(...) { badTile++; continue; }
+            if(x < 0 || y < 0 || x >= sheetWidth || y >= sheetHeight) { badTile++; continue; }
+            if((x % tileSize) != 0 || (y % tileSize) != 0) { badTile++; continue; }
+            // brightness (parts[5]) and default (parts[6]) are accepted as-is
+        }
+    }
+    in2.close();
+    if(!hasTile) {
+        MessageManager::Log("[SMS HD Pack] Manifest validation: No <tile> entries found");
+    }
+    if(badTile > 0) {
+        MessageManager::Log("[SMS HD Pack] Manifest validation: Found " + std::to_string(badTile) + " malformed <tile> entries");
+    }
+
+    HDLOG_TAG("Manifest", "Validation summary: imgs=" + std::to_string((int)imgs.size()) +
+        ", missingImgs=" + std::to_string(missing) + ", hasTile=" + std::to_string(hasTile) +
+        ", badTile=" + std::to_string(badTile));
+}
+
+// Generate an HDNes-style hires.txt manifest
+// Format:
+// <ver>0
+// <scale>N
+// <supportedRom>SHA1
+// <img>filename.png (one per sheet, index is order)
+// #filename.png
+// <tile>imgIndex,tileDataHex,paletteHex,x,y,1,N
+void HdPackBuilderSms::GenerateHdNesManifest(std::ofstream& manifestFile)
+{
+    if(!manifestFile.is_open()) {
+        MessageManager::Log("[SMS HD Pack] Error: Manifest file is not open");
+        return;
+    }
+
+    // Header
+    manifestFile << "<ver>0" << std::endl;
+    manifestFile << "<scale>" << _options.Scale << std::endl;
+
+    // Supported ROM SHA1 (uppercase)
+    std::string sha1 = _emu->GetRomInfo().RomFile.GetSha1Hash();
+    for(char& c : sha1) { c = (char)toupper((unsigned char)c); }
+    manifestFile << "<supportedRom>" << sha1 << std::endl;
+
+    // Build ordered list: Background sheets first, then Sprite sheets
+    std::vector<const SheetInfo*> ordered;
+    ordered.reserve(_sheetInfos.size());
+    for(const SheetInfo& si : _sheetInfos) { if(!si.IsSprite) ordered.push_back(&si); }
+    for(const SheetInfo& si : _sheetInfos) { if( si.IsSprite) ordered.push_back(&si); }
+
+    // Image list and index assignment based on the ordered vector
+    std::unordered_map<std::string, int> imgIndexByName;
+    imgIndexByName.reserve(ordered.size()*2);
+    for(size_t i = 0; i < ordered.size(); i++) {
+        manifestFile << "<img>" << ordered[i]->Filename << std::endl;
+        imgIndexByName[ordered[i]->Filename] = (int)i;
+    }
+    manifestFile << std::endl;
+
+    // Per-image sections
+    auto writeHex = [](uint32_t value, int width) {
+        std::stringstream ss; ss << std::uppercase << std::hex << std::setw(width) << std::setfill('0') << value; return ss.str();
+    };
+
+    for(size_t i = 0; i < ordered.size(); i++) {
+        const SheetInfo& si = *ordered[i];
+        int imgIndex = imgIndexByName[si.Filename];
+        manifestFile << "#" << si.Filename << std::endl;
+
+        for(const SheetTileRef& tr : si.Tiles) {
+            const HdPackTileInfoSms* t = tr.Tile;
+            if(!t) continue;
+
+            // Tile data: use VRAM tile index (tile address / 32) as hex (no prefix)
+            uint32_t vramTileIndex = (uint32_t)(t->TileIndex / SmsHdPackConstants::SMS_TILE_DATA_SIZE);
+            std::stringstream tileDataHex;
+            tileDataHex << std::uppercase << std::hex << vramTileIndex;
+
+            // Palette data: 8-hex-digit uppercase representation of PaletteColors
+            std::string paletteHex = writeHex(t->PaletteColors, 8);
+
+            // Coordinates are pixel positions in the PNG
+            uint32_t x = tr.X;
+            uint32_t y = tr.Y;
+
+            // Brightness: 1 (default)
+            // Default tile flag based on t->DefaultTile
+            char defFlag = t->DefaultTile ? 'Y' : 'N';
+
+            manifestFile << "<tile>" << imgIndex << "," << tileDataHex.str() << "," << paletteHex
+                         << "," << x << "," << y << ",1," << defFlag << std::endl;
+        }
+
+        manifestFile << std::endl;
+    }
 }
 
 // Frame boundary detection and co-occurrence accumulation
@@ -177,6 +423,19 @@ void HdPackBuilderSms::StartRecording() {
     _hdData.Tiles.clear();
     _uniqueSpriteCount = 0;
     _uniqueBgCount = 0;
+    _sheetInfos.clear();
+    
+    // Ensure the save folder exists up-front so users can see it immediately
+    FolderUtilities::CreateFolder(_saveFolder);
+    {
+        std::error_code ec;
+        bool exists = std::filesystem::exists(std::filesystem::u8path(_saveFolder), ec);
+        if(!exists) {
+            MessageManager::Log("[SMS HD Pack] ERROR: Failed to ensure save folder exists: " + _saveFolder);
+        } else {
+            HDLOG_TAG("Folders", "Ensured save folder exists: " + _saveFolder);
+        }
+    }
     
     MessageManager::Log("[SMS HD Pack] Started recording tile data");
     MessageManager::Log("[SMS HD Pack] Save folder: " + _saveFolder);
@@ -448,10 +707,32 @@ void HdPackBuilderSms::ProcessTile(uint32_t cycle, uint32_t scanline, uint32_t t
         vramRegion = "Sprite Attribute Table";
     }
     
-    // Track usage count
+    // Track usage count (per-struct key) and canonical usage (pattern+palette+sprite)
     _tileUsageCount[tile]++;
+    uint64_t canonicalHash = GetCanonicalHash(tile);
+    _canonicalUsageCount[canonicalHash]++;
     
-    // Check if we already have this tile
+    // Prefer canonical deduplication to guarantee no repeats
+    HdPackTileInfoSms* canonicalTile = nullptr;
+    auto itCanon = _tilesByCanonicalHash.find(canonicalHash);
+    if(itCanon != _tilesByCanonicalHash.end()) {
+        canonicalTile = itCanon->second;
+        // Update combined usage and sprite occurrence
+        if(canonicalTile) {
+            canonicalTile->UsageCount = _canonicalUsageCount[canonicalHash];
+            // Insert fast path mapping for this exact key for future lookups
+            _tilesByKey[tile] = canonicalTile;
+            if(isSprite) {
+                NoteSpriteOccurrence(canonicalTile, cycle, scanline);
+            }
+        }
+        if(_options.DebugMode) {
+            MessageManager::Log("[SMS HD Pack] DEBUG: Canonical duplicate tile encountered, updated usage count: " + std::to_string(_canonicalUsageCount[canonicalHash]));
+        }
+        return;
+    }
+    
+    // Check if we already have this tile by struct key (should be rare if canonical caught it)
     auto existingTile = _tilesByKey.find(tile);
     if(existingTile == _tilesByKey.end()) {
         // Track unique tile counts
@@ -500,9 +781,10 @@ void HdPackBuilderSms::ProcessTile(uint32_t cycle, uint32_t scanline, uint32_t t
             MessageManager::Log(ss.str());
         }
         
-        // Initialize per-tile usage count for ordering/sorting
-        hdTile->UsageCount = _tileUsageCount[tile];
+        // Initialize per-tile usage count for ordering/sorting (use combined canonical count)
+        hdTile->UsageCount = _canonicalUsageCount[canonicalHash];
         _tilesByKey[tile] = hdTile;
+        _tilesByCanonicalHash[canonicalHash] = hdTile;
         _hdData.Tiles.push_back(unique_ptr<HdPackTileInfoSms>(hdTile));
         
         // Log tile statistics periodically
@@ -527,11 +809,14 @@ void HdPackBuilderSms::ProcessTile(uint32_t cycle, uint32_t scanline, uint32_t t
     } else {
         // Update existing tile's usage for ordering
         if(existingTile->second) {
-            existingTile->second->UsageCount = _tileUsageCount[tile];
+            // Use canonical usage count for stability across equivalent keys
+            existingTile->second->UsageCount = _canonicalUsageCount[canonicalHash];
+            // Register canonical map if missing (should normally be missing only once)
+            _tilesByCanonicalHash[canonicalHash] = existingTile->second;
         }
         if(_options.DebugMode) {
             MessageManager::Log("[SMS HD Pack] DEBUG: Tile already exists, usage count: " + 
-                              std::to_string(_tileUsageCount[tile]));
+                              std::to_string(_canonicalUsageCount[canonicalHash]));
         }
 
         // Track sprite occurrence within the current frame for grouping
@@ -1675,7 +1960,16 @@ void HdPackBuilderSms::SaveHdPack()
     MessageManager::Log("[SMS HD Pack] Found " + std::to_string(_hdData.Tiles.size()) + " tiles to save");
         
     // Create output directory if it doesn't exist
-    std::filesystem::create_directory(_saveFolder);
+    FolderUtilities::CreateFolder(_saveFolder);
+    {
+        std::error_code ec;
+        bool exists = std::filesystem::exists(std::filesystem::u8path(_saveFolder), ec);
+        if(!exists) {
+            MessageManager::Log("[SMS HD Pack] ERROR: Save folder does not exist and could not be created: " + _saveFolder);
+        } else {
+            HDLOG_TAG("Folders", "Confirmed save folder exists: " + _saveFolder);
+        }
+    }
     
     // Separate tiles into sprite and background collections
     vector<HdPackTileInfoSms*> spriteTiles;
@@ -1694,22 +1988,30 @@ void HdPackBuilderSms::SaveHdPack()
 
     // Optional: sort tiles by usage frequency (player sprites should surface first)
     if(_options.SortByUsageFrequency) {
-        auto byUsageDesc = [](HdPackTileInfoSms* a, HdPackTileInfoSms* b) {
+        auto byStable = [this](HdPackTileInfoSms* a, HdPackTileInfoSms* b) {
             if(a && b) {
-                if(a->UsageCount != b->UsageCount) {
-                    return a->UsageCount > b->UsageCount;
+                uint64_t ha = GetCanonicalHash(a);
+                uint64_t hb = GetCanonicalHash(b);
+                uint32_t ua = 0, ub = 0;
+                auto ita = _canonicalUsageCount.find(ha);
+                if(ita != _canonicalUsageCount.end()) ua = ita->second;
+                auto itb = _canonicalUsageCount.find(hb);
+                if(itb != _canonicalUsageCount.end()) ub = itb->second;
+                if(ua != ub) {
+                    return ua > ub;
                 }
-                // Stable fallback: prefer sprites first when counts are equal
-                if(a->IsSprite != b->IsSprite) {
-                    return a->IsSprite && !b->IsSprite;
+                // Group backgrounds by VRAM bank for locality
+                if(!a->IsSprite && !b->IsSprite && a->VramBankId != b->VramBankId) {
+                    return a->VramBankId < b->VramBankId;
                 }
-                return false;
+                // Stable fallback: canonical hash order
+                return ha < hb;
             }
             // Non-null comes before null
             return a != nullptr;
         };
-        std::stable_sort(bgTiles.begin(), bgTiles.end(), byUsageDesc);
-        std::stable_sort(spriteTiles.begin(), spriteTiles.end(), byUsageDesc);
+        std::stable_sort(bgTiles.begin(), bgTiles.end(), byStable);
+        std::stable_sort(spriteTiles.begin(), spriteTiles.end(), byStable);
     }
     
     // Optional: group related sprite tiles (metasprite clusters) contiguously
@@ -1735,9 +2037,9 @@ void HdPackBuilderSms::SaveHdPack()
             sheetTiles.push_back(spriteTiles[i + j]);
         }
                 
-        // Generate descriptive sheet filename for sprite tiles
+        // Generate original SMS sprite sheet filename: SPRITES_XXX.png
         std::stringstream ss;
-        ss << "SPRITES_" << std::setw(3) << std::setfill('0') << i/256 << ".png";
+        ss << "SPRITES_" << std::setw(3) << std::setfill('0') << (i/256) << ".png";
         std::string sheetName = ss.str();
                 
         // Save the sprite tile sheet
@@ -1755,9 +2057,9 @@ void HdPackBuilderSms::SaveHdPack()
             sheetTiles.push_back(bgTiles[i + j]);
         }
                 
-        // Generate descriptive sheet filename for background tiles
+        // Generate original SMS background sheet filename: BGTILES_XXX.png
         std::stringstream ss;
-        ss << "BGTILES_" << std::setw(3) << std::setfill('0') << i/256 << ".png";
+        ss << "BGTILES_" << std::setw(3) << std::setfill('0') << (i/256) << ".png";
         std::string sheetName = ss.str();
                 
         // Save the background tile sheet
@@ -1765,27 +2067,20 @@ void HdPackBuilderSms::SaveHdPack()
         tileSheets.push_back(sheetName);
     }
     
-    // Create and write proper hires.txt manifest file for HD pack replacement
+    // Create and write hires.txt manifest file (HDNes-style)
     string manifestPath = FolderUtilities::CombinePath(_saveFolder, "hires.txt");
     std::ofstream manifestFile(manifestPath);
     
     if(manifestFile.is_open()) {
-        // Write header with ROM information
-        manifestFile << "#HD Pack for " << _romName << std::endl;
-        manifestFile << "#Generated by Mesen2 SMS HD Pack Builder" << std::endl;
-        manifestFile << "#Version 1.0" << std::endl;
-        manifestFile << std::endl;
-        
-        // Write scale setting
-        manifestFile << "<scale>" << _options.Scale << "</scale>" << std::endl;
-        manifestFile << std::endl;
-        
-        // Write tile mapping entries for replacement system
-        GenerateHdPackTileEntries(manifestFile);
+        GenerateHdNesManifest(manifestFile);
         
         manifestFile.close();
-        MessageManager::Log("[SMS HD Pack] HD Pack manifest created: " + manifestPath);
+        MessageManager::Log("[SMS HD Pack] HD Pack manifest (HDNes-style) created: " + manifestPath);
+        // Validate manifest content and file list for correctness
+        ValidateHdNesManifestFile(manifestPath);
         MessageManager::Log("[SMS HD Pack] Total tiles processed: " + std::to_string(_hdData.Tiles.size()));
+        HDLOG_TAG("Manifest", "BG tiles: " + std::to_string(bgTiles.size()) +
+            ", Sprite tiles: " + std::to_string(spriteTiles.size()));
     } else {
         MessageManager::Log("[SMS HD Pack] Error: Failed to create manifest file");
     }
@@ -2001,6 +2296,11 @@ void HdPackBuilderSms::CreateTileSheets(const vector<HdPackTileInfoSms*>& tiles,
         
         vector<uint32_t> pngBuffer(pngWidth * pngHeight, 0x00000000);
         
+        // Prepare a new sheet info to track tile coordinates for manifest
+        SheetInfo sheetInfo;
+        sheetInfo.Filename = GenerateSheetFilename(filename, sheetIndex, totalSheets);
+        sheetInfo.IsSprite = isSprite;
+
         // Draw tiles to buffer using helper function
         for(int i = 0; i < tilesInSheet; i++) {
             HdPackTileInfoSms* tile = tiles[startTile + i];
@@ -2010,16 +2310,21 @@ void HdPackBuilderSms::CreateTileSheets(const vector<HdPackTileInfoSms*>& tiles,
             int gridY = i / gridWidth;
             
             DrawTileToBuffer(tile, gridX, gridY, pngBuffer.data(), pngWidth, tileSize);
+
+            // Record mapping for manifest (pixel coordinates)
+            SheetTileRef tr { tile, (uint16_t)(gridX * tileSize), (uint16_t)(gridY * tileSize) };
+            sheetInfo.Tiles.push_back(tr);
         }
         
-        // Generate filename and save PNG
-        string sheetFilename = GenerateSheetFilename(filename, sheetIndex, totalSheets);
+        // Save PNG
+        string sheetFilename = sheetInfo.Filename;
         string fullPath = FolderUtilities::CombinePath(saveFolder, sheetFilename);
         bool success = PNGHelper::WritePNG(fullPath, pngBuffer.data(), pngWidth, pngHeight, 32);
         
         if(success) {
             MessageManager::Log("[SMS HD Pack] Saved " + string(isSprite ? "sprite" : "background") + 
                                " sheet: " + sheetFilename + " (" + std::to_string(tilesInSheet) + " tiles)");
+            _sheetInfos.push_back(std::move(sheetInfo));
         } else {
             MessageManager::Log("[SMS HD Pack] Failed to save " + string(isSprite ? "sprite" : "background") + " sheet: " + sheetFilename);
         }
@@ -2112,6 +2417,65 @@ uint32_t HdPackBuilderSms::GetTileVisualHash(const HdPackTileInfoSms* tile) cons
     }
     
     return hash;
+}
+
+// Canonical identity hash for tiles: pattern data + palette selection (0/1 for BG, 1 for sprites) + sprite flag
+// Uses FNV-1a 64-bit for stability across runs/platforms
+uint64_t HdPackBuilderSms::GetCanonicalHash(const HdTileKeySms& key) const
+{
+    const uint64_t FNV_OFFSET = 1469598103934665603ULL;
+    const uint64_t FNV_PRIME  = 1099511628211ULL;
+    uint64_t h = FNV_OFFSET;
+
+    if(key.IsVramTile) {
+        for(int i = 0; i < (int)SmsHdPackConstants::SMS_TILE_DATA_SIZE; i++) {
+            h ^= (uint64_t)key.TileData[i];
+            h *= FNV_PRIME;
+        }
+    } else {
+        // Hash TileIndex bytes (little-endian) for non-VRAM tiles
+        uint32_t idx = (uint32_t)key.TileIndex;
+        for(int i = 0; i < 4; i++) {
+            h ^= (uint64_t)((idx >> (i*8)) & 0xFF);
+            h *= FNV_PRIME;
+        }
+    }
+
+    // Normalize palette selection: BG => 0/1, Sprite => 1
+    uint8_t pal = key.IsSprite ? 1 : HdTileKeySms::NormalizePaletteIndex(key.PaletteColors);
+    h ^= (uint64_t)pal;
+    h *= FNV_PRIME;
+
+    // Sprite/background flag
+    h ^= (uint64_t)(key.IsSprite ? 1 : 0);
+    h *= FNV_PRIME;
+
+    return h;
+}
+
+uint64_t HdPackBuilderSms::GetCanonicalHash(const HdPackTileInfoSms* tile) const
+{
+    if(!tile) return 0ULL;
+    const uint64_t FNV_OFFSET = 1469598103934665603ULL;
+    const uint64_t FNV_PRIME  = 1099511628211ULL;
+    uint64_t h = FNV_OFFSET;
+
+    // Hash the 32-byte pattern
+    for(int i = 0; i < (int)SmsHdPackConstants::SMS_TILE_DATA_SIZE; i++) {
+        h ^= (uint64_t)tile->TileData[i];
+        h *= FNV_PRIME;
+    }
+
+    // Palette selection normalized
+    uint8_t pal = tile->IsSprite ? 1 : HdTileKeySms::NormalizePaletteIndex(tile->PaletteColors);
+    h ^= (uint64_t)pal;
+    h *= FNV_PRIME;
+
+    // Sprite/background flag
+    h ^= (uint64_t)(tile->IsSprite ? 1 : 0);
+    h *= FNV_PRIME;
+
+    return h;
 }
 
 // Helper function to read tile data from VRAM

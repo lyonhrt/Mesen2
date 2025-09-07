@@ -24,6 +24,8 @@ namespace Mesen.ViewModels
 		[Reactive] public bool IsOpenFolderEnabled { get; set; }
 		[Reactive] public SmsHdPackBuilderConfig Config { get; set; }
 		[Reactive] public FilterInfo? SelectedFilter { get; set; }
+		[Reactive] public bool ScaleLocked { get; set; }
+		[Reactive] public bool IsFilterEnabled { get; set; }
 		
 		[Reactive] public FilterInfo[] Filters { get; private set; } = Array.Empty<FilterInfo>();
 
@@ -33,10 +35,15 @@ namespace Mesen.ViewModels
 		{
 			Config = ConfigManager.Config.SmsHdPackBuilder;
 			SaveFolder = Path.Join(ConfigManager.HdPackFolder, EmuApi.GetRomInfo().GetRomName());
+			ScaleLocked = false;
+			IsFilterEnabled = true;
 
 			UpdateFilterDropdown();
 
 			SelectedFilter = Filters.Where(x => x.FilterType == Config.FilterType && x.Scale == Config.Scale).FirstOrDefault() ?? Filters[0];
+
+			// If an existing hires.txt is present and indicates a scale, lock the scale to that value.
+			TryLockScaleFromExistingManifest();
 			
 			AddDisposable(this.WhenAnyValue(x => x.SelectedFilter).Subscribe(filter => {
 				if(filter != null) {
@@ -47,6 +54,7 @@ namespace Mesen.ViewModels
 
 			AddDisposable(this.WhenAnyValue(x => x.IsRecording).Subscribe(recording => {
 				IsOpenFolderEnabled = !recording && Directory.Exists(SaveFolder);
+				IsFilterEnabled = !recording && !ScaleLocked;
 			}));
 
 			// Note: State change notifications will be handled by the emulator core
@@ -89,6 +97,45 @@ namespace Mesen.ViewModels
 
 			Filters = _allFilters;
 			SelectedFilter = selectedFilter;
+		}
+
+		private void TryLockScaleFromExistingManifest()
+		{
+			try {
+				string manifest = Path.Combine(SaveFolder, "hires.txt");
+				if(!File.Exists(manifest)) {
+					return;
+				}
+
+				int? scale = ParseScaleFromManifest(manifest);
+				if(scale.HasValue && scale.Value >= 1 && scale.Value <= 10) {
+					ScaleLocked = true;
+					IsFilterEnabled = !IsRecording && !ScaleLocked;
+					// Update config and selection to the locked scale
+					Config.Scale = (uint)scale.Value;
+					UpdateFilterDropdown();
+					SelectedFilter = Filters.Where(x => x.Scale == Config.Scale && x.FilterType == Config.FilterType).FirstOrDefault()
+						?? Filters.Where(x => x.Scale == Config.Scale).FirstOrDefault()
+						?? Filters[0];
+				}
+			} catch { /* ignore parse errors */ }
+		}
+
+		private static int? ParseScaleFromManifest(string manifestPath)
+		{
+			foreach(string line in File.ReadLines(manifestPath)) {
+				string l = line.Trim();
+				if(l.StartsWith("<scale>", StringComparison.OrdinalIgnoreCase)) {
+					// formats supported: "<scale>4" or "<scale>4</scale>"
+					string rest = l.Substring("<scale>".Length).Trim();
+					int end = rest.IndexOf('<');
+					if(end >= 0) rest = rest.Substring(0, end);
+					if(int.TryParse(rest.Trim(), out int s)) {
+						return s;
+					}
+				}
+			}
+			return null;
 		}
 
 		public void StartRecording()

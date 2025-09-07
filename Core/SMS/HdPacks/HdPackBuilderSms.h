@@ -59,6 +59,10 @@ private:
     // Track tile usage
     unordered_map<HdTileKeySms, uint32_t> _tileUsageCount;
     unordered_map<HdTileKeySms, HdPackTileInfoSms*> _tilesByKey;
+    // Canonical deduplication map (pattern + palette selection + sprite flag)
+    unordered_map<uint64_t, HdPackTileInfoSms*> _tilesByCanonicalHash;
+    // Combined usage count by canonical hash for stable ordering
+    unordered_map<uint64_t, uint32_t> _canonicalUsageCount;
     
     // SMS palette data
     uint32_t _palette[SmsHdPackConstants::SMS_PALETTE_SIZE] = {}; // Full SMS palette
@@ -141,12 +145,16 @@ private:
     
     // HD Pack manifest generation
     void GenerateHdPackTileEntries(std::ofstream& manifestFile);
+    void GenerateHdNesManifest(std::ofstream& manifestFile);
+    void ValidateHdNesManifestFile(const string& manifestPath);
     
     // Advanced deduplication and arrangement methods
     bool ProcessTile(HdPackTileInfoSms* tile);
     uint64_t GetTileHash(HdPackTileInfoSms* tile);
     uint64_t GetPreciseTileHash(HdPackTileInfoSms* tile);
     uint32_t GetTileVisualHash(const HdPackTileInfoSms* tile) const;
+    uint64_t GetCanonicalHash(const HdTileKeySms& key) const;
+    uint64_t GetCanonicalHash(const HdPackTileInfoSms* tile) const;
     uint32_t countBits(uint32_t value) const;
     void GroupRelatedTiles(std::vector<HdPackTileInfoSms*>& tiles, std::vector<std::vector<HdPackTileInfoSms*>>& groupedTiles, bool useCache);
     void VerifyPaletteUsage(HdPackTileInfoSms* tile, uint8_t* paletteRam);
@@ -164,4 +172,12 @@ private:
     void SaveDebugTileGrid();  // Save a debug grid showing all tiles
     void LogPaletteInfo();  // Log palette information for debugging
     void SaveDebugInfo();  // Save debug information to a log file
+
+    // Mapping of saved tile sheets and per-tile positions for HDNes-style manifest output
+    struct SheetTileRef { HdPackTileInfoSms* Tile; uint16_t X; uint16_t Y; };
+    struct SheetInfo { string Filename; bool IsSprite; std::vector<SheetTileRef> Tiles; };
+    std::vector<SheetInfo> _sheetInfos;
+
+    // Manifest helpers
+    void TryOverrideScaleFromExistingManifest();
 };

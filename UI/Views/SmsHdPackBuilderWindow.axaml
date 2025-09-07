@@ -83,7 +83,7 @@
               <ComboBox Grid.Column="1" 
                         ItemsSource="{Binding Filters}"
                         SelectedItem="{Binding SelectedFilter}"
-                        IsEnabled="{Binding !IsRecording}" />
+                        IsEnabled="{Binding IsFilterEnabled}" />
             </Grid>
 
           </StackPanel>

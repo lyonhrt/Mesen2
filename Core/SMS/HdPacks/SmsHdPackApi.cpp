@@ -8,12 +8,15 @@
 #include "Shared/MessageManager.h"
 #include "Utilities/FolderUtilities.h"
 #include <memory>
+#include "SMS/HdPacks/HdPackDebug.h"
 
 namespace SmsHdPackApi {
     // Global state for HD pack dumping
     static std::unique_ptr<HdPackBuilderSms> g_hdPackBuilder;
     static std::unique_ptr<SmsHdTileDumper> g_hdTileDumper;
     static bool g_isDumping = false;
+    static uint64_t g_bgSeen = 0;
+    static uint64_t g_sprSeen = 0;
 
     // Helper function to sanitize ROM names for filesystem use
     string SanitizeRomName(const string& romName) {
@@ -76,6 +79,8 @@ namespace SmsHdPackApi {
             return;
         }
         
+        HDLOG_TAG("Session", "Power off: saving. BG seen=" + std::to_string(g_bgSeen) + ", SPR seen=" + std::to_string(g_sprSeen));
+
         if(g_hdPackBuilder) {
             MessageManager::Log("[SMS HD Pack] Saving tiles on power off...");
             g_hdPackBuilder->SaveHdPack();
@@ -91,6 +96,7 @@ namespace SmsHdPackApi {
         }
         
         g_isDumping = false;
+        g_bgSeen = g_sprSeen = 0;
     }
 
     // Explicit start recording entry point (called from UI shortcut)
@@ -119,8 +125,10 @@ namespace SmsHdPackApi {
         }
         
         g_isDumping = true;
+        g_bgSeen = g_sprSeen = 0;
         
         MessageManager::Log("[SMS HD Pack] Recording started. Saving to: " + options.SaveFolder);
+        HDLOG_TAG("Session", "Recording started: folder=" + options.SaveFolder);
     }
 
     // Explicit stop recording entry point (called from UI shortcut)
@@ -139,6 +147,8 @@ namespace SmsHdPackApi {
         }
         
         g_isDumping = false;
+        HDLOG_TAG("Counters", "BG tiles seen=" + std::to_string(g_bgSeen) + ", SPR tiles seen=" + std::to_string(g_sprSeen));
+        g_bgSeen = g_sprSeen = 0;
         MessageManager::Log("[SMS HD Pack] Recording stopped.");
     }
 
@@ -164,6 +174,7 @@ namespace SmsHdPackApi {
             
             // Process the tile
             uint32_t bankHash = tileAddr / 0x1000;
+            g_bgSeen++;
             g_hdPackBuilder->ProcessTile(x, y, tileAddr, tileKey, false, bankHash, false);
         }
         
@@ -198,6 +209,7 @@ namespace SmsHdPackApi {
             
             // Process as sprite tile
             uint32_t bankHash = tileAddr / 0x1000;
+            g_sprSeen++;
             g_hdPackBuilder->ProcessTile(x, y, tileAddr, tileKey, true, bankHash, false);
         }
         
