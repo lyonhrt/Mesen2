@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
@@ -85,6 +85,9 @@ namespace Mesen.Interop
 
 		[DllImport(DllPath)] public static extern void ExecuteShortcut(ExecuteShortcutParams p);
 		[DllImport(DllPath)] [return: MarshalAs(UnmanagedType.I1)] public static extern bool IsShortcutAllowed(EmulatorShortcut shortcut, UInt32 shortcutParam = 0);
+
+		// SMS HD pack recording state
+		[DllImport(DllPath)] [return: MarshalAs(UnmanagedType.I1)] public static extern bool SmsIsHdPackRecording();
 
 		[DllImport(DllPath, EntryPoint = "GetLog")] private static extern void GetLogWrapper(IntPtr outLog, Int32 maxLength);
 		public static string GetLog() { return Utf8Utilities.CallStringApi(GetLogWrapper, 100000); }

@@ -1,4 +1,4 @@
-﻿using Mesen.Localization;
+using Mesen.Localization;
 using Mesen.Config.Shortcuts;
 using System;
 using System.Collections.Generic;

@@ -527,6 +527,13 @@ bool Emulator::InternalLoadRom(VirtualFile romFile, VirtualFile patchFile, bool 
 	// Auto-start SMS HD pack dumping for SMS games
 	if(!forPowerCycle) {  // Only start on initial load, not on power cycle
 		SmsHdPackApi::AutoStartOnGameLoaded(this);
+		// Apply current SMS setting to enable/disable HD replacement
+		bool smsHdEnabled = GetSettings()->GetSmsConfig().EnableHdPacks;
+		SmsHdPackApi::SetHdReplacementEnabled(smsHdEnabled);
+		// Only load packs when enabled
+		if(smsHdEnabled) {
+			SmsHdPackApi::LoadHdPackIfAvailable(this);
+		}
 	}
 	
 	_threadPaused = false;

@@ -31,4 +31,29 @@ namespace SmsHdPackApi {
 
     // Check if HD tile dumping is enabled
     bool IsHdTileDumpingEnabled();
+
+    // HD replacement (loader)
+    // Load SMS HD pack (hires.txt + PNGs) if present in HdPacks/<RomName>/ on game load
+    void LoadHdPackIfAvailable(Emulator* emu);
+    // Enable/disable HD tile replacement (does not affect tile dumping)
+    void SetHdReplacementEnabled(bool enabled);
+    bool IsHdReplacementEnabled();
+
+    // Lookup replacement by VRAM tile index/palette group
+    // palGroup: 0 = BG low palette, 1 = BG high or any sprite
+    bool TryGetReplacementByIndex(uint32_t tileIndex, bool isSprite, uint8_t palGroup,
+                                  const uint8_t* tileData32,
+                                  int& imgIndex, uint16_t& srcX, uint16_t& srcY, uint32_t& scale);
+
+    // Lookup replacement by canonical hash of (tileData[32], palGroup, isSprite)
+    bool TryGetReplacementByHash(const uint8_t* tileData32, bool isSprite, uint8_t palGroup,
+                                 int& imgIndex, uint16_t& srcX, uint16_t& srcY, uint32_t& scale);
+
+    // Sample 8 pixels from a replacement row for a given tile row
+    // - imgIndex/srcX/srcY/scale come from TryGetReplacement*
+    // - rowWithinTile: 0..7 (the row inside the 8x8 tile)
+    // - hMirror: horizontally mirror the 8 pixels when true
+    // - outPixels8: returns 8 RGB555 pixels ready for the output buffer
+    bool SampleReplacementRow8(int imgIndex, uint16_t srcX, uint16_t srcY, uint32_t scale,
+                               uint8_t rowWithinTile, bool hMirror, uint16_t* outPixels8);
 }

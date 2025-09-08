@@ -523,6 +523,7 @@
 			<Control ID="tpgGeneral">General</Control>
 			<Control ID="lblRegionSms">Region (Master System):</Control>
 			<Control ID="lblRegionGg">Region (Game Gear):</Control>
+			<Control ID="chkEnableHdPacks">Enable HD packs</Control>
 
 			<Control ID="tpgAudio">Audio</Control>
 			<Control ID="grpVolume">Volume</Control>

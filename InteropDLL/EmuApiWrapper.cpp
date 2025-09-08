@@ -18,6 +18,7 @@
 #include "Utilities/FolderUtilities.h"
 #include "Utilities/StringUtilities.h"
 #include "InteropNotificationListeners.h"
+#include "Core/SMS/HdPacks/SmsHdPackApi.h"
 
 #ifdef _WIN32
 	#include "Windows/Renderer.h"
@@ -285,6 +286,11 @@ extern "C" {
 
 	DllExport void __stdcall ExecuteShortcut(ExecuteShortcutParams params) { _emu->GetNotificationManager()->SendNotification(ConsoleNotificationType::ExecuteShortcut, &params); }
 	DllExport bool __stdcall IsShortcutAllowed(EmulatorShortcut shortcut, uint32_t shortcutParam) { return _emu->GetShortcutKeyHandler()->IsShortcutAllowed(shortcut, shortcutParam); }
+
+	DllExport bool __stdcall SmsIsHdPackRecording()
+	{
+		return SmsHdPackApi::IsCurrentlyDumping();
+	}
 
 	DllExport void __stdcall WriteLogEntry(char* message) { MessageManager::Log(message); }
 

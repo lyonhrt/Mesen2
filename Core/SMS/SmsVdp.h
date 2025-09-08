@@ -71,10 +71,17 @@ private:
 	uint32_t _bgPriority = 0;
 	uint32_t _bgPalette = 0;
 	uint16_t _bgTileAddr = 0;
+	// Raw BG tile index from nametable (ntData & 0x1FF), used for HD replacement key
+	uint16_t _bgTileIndexRaw = 0;
 	uint16_t _bgOffsetY = 0;
 	uint16_t _minDrawCycle = 0;
 	uint8_t _pixelsAvailable = 0;
 	bool _bgHorizontalMirror = false;
+
+	// HD replacement (background) - active row buffer
+	bool _hdBgRowActive = false;
+	uint16_t _hdBgRowPixels[8] = {};
+	uint8_t _hdBgRowRemaining = 0;
 
 	struct SpriteShifter
 	{
@@ -83,6 +90,15 @@ private:
 		int16_t SpriteX = 0;
 		uint8_t SpriteRow = 0;
 		bool HardwareSprite = false;
+
+		// Raw sprite tile index read from sprite table (without pattern base),
+		// used for HD replacement key to match manifest indices
+		uint16_t RawTileIndex = 0;
+
+		// HD replacement (per-sprite row buffer)
+		bool HdRowActive = false;
+		uint8_t HdRowIndex = 0; // 0..8
+		uint16_t HdRowPixels[8] = {};
 	};
 
 	uint8_t _evalCounter = 0;

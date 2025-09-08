@@ -368,6 +368,8 @@ void SmsVdp::LoadBgTilesSms()
 
 			bool vMirror = ntData & 0x400;
 			uint16_t tileIndex = ntData & 0x1FF;
+			// Store raw BG tile index from nametable for HD replacement lookups
+			_bgTileIndexRaw = tileIndex;
 			uint8_t tileRow = vMirror ? 7 - (y & 0x07) : (y & 0x07);
 
 			_bgPriority |= ((ntData & 0x1000) ? 0xFF : 0) << (16 - _pixelsAvailable);
@@ -440,6 +442,21 @@ void SmsVdp::LoadBgTilesSms()
 				// Call HD pack API to process this tile
 				SmsHdPackApi::ProcessSmsBackgroundTile(_emu, x, y, baseTileAddr, tileData, paletteColors, 
 													 _bgHorizontalMirror, false, (_bgPriority & (0xFF << (16 - _pixelsAvailable))) != 0);
+
+				// Prefetch HD replacement row for this tile row (for rendering)
+				if(SmsHdPackApi::IsHdReplacementEnabled()) {
+					int imgIdx; uint16_t srcX, srcY; uint32_t scale;
+					uint8_t palGroup = (_bgPalette & (0xFF << (16 - _pixelsAvailable))) ? 1 : 0;
+					// Use raw nametable tile index to match manifest entries
+					uint32_t tileIndex = _bgTileIndexRaw;
+					uint8_t rowWithinTile = (uint8_t)(((_bgTileAddr >> 2) & 0x07));
+					if(SmsHdPackApi::TryGetReplacementByIndex(tileIndex, false, palGroup, tileData, imgIdx, srcX, srcY, scale)) {
+						if(SmsHdPackApi::SampleReplacementRow8(imgIdx, srcX, srcY, scale, rowWithinTile, _bgHorizontalMirror, _hdBgRowPixels)) {
+							_hdBgRowActive = true;
+							_hdBgRowRemaining = 8;
+						}
+					}
+				}
 			}
 
 			_pixelsAvailable += 8;
@@ -699,6 +716,10 @@ void SmsVdp::ProcessEndOfScanline()
 	_bgPriority = 0;
 	_bgPalette = 0;
 
+	// Reset HD replacement row buffer at the start of the visible area
+	_hdBgRowActive = false;
+	_hdBgRowRemaining = 0;
+
 	uint8_t borderWidth = 0;
 	if(_state.UseMode4) {
 		if(_state.Scanline < 16 && _state.HorizontalScrollLock) {
@@ -824,6 +845,8 @@ void SmsVdp::LoadSpriteTilesSms()
 			uint16_t loadAddr = spriteAddr + 0x80 + _inRangeSprites[_spriteCount] * 2;
 			_spriteShifters[_spriteCount].SpriteX = ReadVram(loadAddr, SmsVdpMemAccess::SpriteLoadTable);
 			uint8_t sprTileIndex = ReadVram(loadAddr + 1, SmsVdpMemAccess::SpriteLoadTable);
+			// Store raw tile index (apply even mask when using large sprites)
+			_spriteShifters[_spriteCount].RawTileIndex = _state.UseLargeSprites ? (sprTileIndex & ~0x01) : sprTileIndex;
 			_spriteShifters[_spriteCount].TileAddr = GetSmsSpriteTileAddr(sprTileIndex, _spriteShifters[_spriteCount].SpriteRow, _inRangeSprites[_spriteCount]);
 			break;
 		}
@@ -836,6 +859,8 @@ void SmsVdp::LoadSpriteTilesSms()
 			uint16_t loadAddr = spriteAddr + 0x80 + _inRangeSprites[_spriteCount + 1] * 2;
 			_spriteShifters[_spriteCount + 1].SpriteX = ReadVram(loadAddr, SmsVdpMemAccess::SpriteLoadTable);
 			uint8_t sprTileIndex = ReadVram(loadAddr + 1, SmsVdpMemAccess::SpriteLoadTable);
+			// Store raw tile index (apply even mask when using large sprites)
+			_spriteShifters[_spriteCount + 1].RawTileIndex = _state.UseLargeSprites ? (sprTileIndex & ~0x01) : sprTileIndex;
 			_spriteShifters[_spriteCount + 1].TileAddr = GetSmsSpriteTileAddr(sprTileIndex, _spriteShifters[_spriteCount + 1].SpriteRow, _inRangeSprites[_spriteCount + 1]);
 			break;
 		}
@@ -857,7 +882,7 @@ void SmsVdp::LoadSpriteTilesSms()
 			if(!_disableSprites) {
 				// Collect the complete 32-byte SMS sprite tile data
 				uint8_t spriteTileData[32];
-				uint16_t spriteTileAddr = _spriteShifters[_spriteCount].TileAddr & ~3; // Align to tile boundary
+				uint16_t spriteTileAddr = _spriteShifters[_spriteCount].TileAddr & ~3; // Align to 4-byte row boundary
 				
 				// Read the complete 32-byte tile (8 rows x 4 bytes per row)
 				for(int i = 0; i < 32; i++) {
@@ -873,6 +898,19 @@ void SmsVdp::LoadSpriteTilesSms()
 				
 				// Call HD pack API to process this sprite tile
 				SmsHdPackApi::ProcessSmsSprite(_emu, spriteX, spriteY, spriteTileAddr, spriteTileData, spritePaletteColors);
+
+				// Prefetch HD replacement row for this sprite row (for rendering)
+				if(SmsHdPackApi::IsHdReplacementEnabled()) {
+					int imgIdx; uint16_t srcX, srcY; uint32_t scale;
+					uint32_t tileIndex = _spriteShifters[_spriteCount].RawTileIndex;
+					uint8_t rowWithinTile = _spriteShifters[_spriteCount].SpriteRow & 0x07;
+					if(SmsHdPackApi::TryGetReplacementByIndex(tileIndex, true, 1, spriteTileData, imgIdx, srcX, srcY, scale)) {
+						if(SmsHdPackApi::SampleReplacementRow8(imgIdx, srcX, srcY, scale, rowWithinTile, false, _spriteShifters[_spriteCount].HdRowPixels)) {
+							_spriteShifters[_spriteCount].HdRowActive = true;
+							_spriteShifters[_spriteCount].HdRowIndex = 0;
+						}
+					}
+				}
 			}
 			
 			if(_state.ShiftSpritesLeft) {
@@ -894,7 +932,7 @@ void SmsVdp::LoadSpriteTilesSms()
 			_spriteShifters[_spriteCount + 1].TileData[2] = ReadVram(_spriteShifters[_spriteCount + 1].TileAddr + 2, SmsVdpMemAccess::SpriteLoadTile);
 			_spriteShifters[_spriteCount + 1].TileData[3] = ReadVram(_spriteShifters[_spriteCount + 1].TileAddr + 3, SmsVdpMemAccess::SpriteLoadTile);
 			
-			// 🎯 HD PACK INTEGRATION: Capture real SMS sprite tile data (N+1)
+			// HD PACK INTEGRATION: Capture real SMS sprite tile data (N+1)
 			if(!_disableSprites) {
 				// Collect the complete 32-byte SMS sprite tile data
 				uint8_t spriteTileData[32];
@@ -914,6 +952,19 @@ void SmsVdp::LoadSpriteTilesSms()
 				
 				// Call HD pack API to process this sprite tile
 				SmsHdPackApi::ProcessSmsSprite(_emu, spriteX, spriteY, spriteTileAddr, spriteTileData, spritePaletteColors);
+
+				// Prefetch HD replacement row for this sprite row (for rendering)
+				if(SmsHdPackApi::IsHdReplacementEnabled()) {
+					int imgIdx; uint16_t srcX, srcY; uint32_t scale;
+					uint32_t tileIndex = (spriteTileAddr / 32);
+					uint8_t rowWithinTile = _spriteShifters[_spriteCount + 1].SpriteRow & 0x07;
+					if(SmsHdPackApi::TryGetReplacementByIndex(tileIndex, true, 1, spriteTileData, imgIdx, srcX, srcY, scale)) {
+						if(SmsHdPackApi::SampleReplacementRow8(imgIdx, srcX, srcY, scale, rowWithinTile, false, _spriteShifters[_spriteCount + 1].HdRowPixels)) {
+							_spriteShifters[_spriteCount + 1].HdRowActive = true;
+							_spriteShifters[_spriteCount + 1].HdRowIndex = 0;
+						}
+					}
+				}
 			}
 			
 			if(_state.ShiftSpritesLeft) {
@@ -1151,66 +1202,93 @@ bool SmsVdp::IsZoomedSpriteAllowed(int spriteIndex)
 
 uint16_t SmsVdp::GetPixelColor()
 {
-	if(!_state.RenderingEnabled || _state.Cycle < SmsVdp::SmsVdpLeftBorder) {
-		return _internalPaletteRam[0x10 | _state.BackgroundColorIndex];
-	}
+    if(!_state.RenderingEnabled || _state.Cycle < SmsVdp::SmsVdpLeftBorder) {
+        return _internalPaletteRam[0x10 | _state.BackgroundColorIndex];
+    }
 
-	bool spriteDrawn = false;
-	uint8_t spritePixelColor = 0;
-	uint16_t xPos = GetVisiblePixelIndex();
-	for(int i = 0; i < _spriteCount; i++) {
-		if(xPos >= _spriteShifters[i].SpriteX && xPos < _spriteShifters[i].SpriteX + (8 << (uint8_t)IsZoomedSpriteAllowed(i))) {
-			if(_state.UseMode4) {
-				uint8_t sprColor = (
-					((_spriteShifters[i].TileData[0] >> 7) & 0x01) |
-					((_spriteShifters[i].TileData[1] >> 6) & 0x02) |
-					((_spriteShifters[i].TileData[2] >> 5) & 0x04) |
-					((_spriteShifters[i].TileData[3] >> 4) & 0x08)
-				);
+    bool spriteDrawn = false;
+    uint8_t spritePixelColor = 0;
+    int drawnSpriteIndex = -1;
+    uint8_t drawnSpriteHdIdx = 0;
+    bool drawnSpriteHasHd = false;
+    uint16_t xPos = GetVisiblePixelIndex();
+    for(int i = 0; i < _spriteCount; i++) {
+        if(xPos >= _spriteShifters[i].SpriteX && xPos < _spriteShifters[i].SpriteX + (8 << (uint8_t)IsZoomedSpriteAllowed(i))) {
+            if(_state.UseMode4) {
+                uint8_t sprColor = (
+                    ((_spriteShifters[i].TileData[0] >> 7) & 0x01) |
+                    ((_spriteShifters[i].TileData[1] >> 6) & 0x02) |
+                    ((_spriteShifters[i].TileData[2] >> 5) & 0x04) |
+                    ((_spriteShifters[i].TileData[3] >> 4) & 0x08)
+                );
+                // HD row sampling: snapshot current HD index, then advance index when shifters advance
+                uint8_t curHdIdx = _spriteShifters[i].HdRowIndex;
+                bool curHasHd = _spriteShifters[i].HdRowActive && (curHdIdx < 8);
+                bool advanceShifter = !IsZoomedSpriteAllowed(i) || ((_spriteShifters[i].SpriteX - xPos) & 0x01);
+                if(advanceShifter) {
+                    _spriteShifters[i].TileData[0] <<= 1;
+                    _spriteShifters[i].TileData[1] <<= 1;
+                    _spriteShifters[i].TileData[2] <<= 1;
+                    _spriteShifters[i].TileData[3] <<= 1;
+                    if(_spriteShifters[i].HdRowActive) {
+                        if(_spriteShifters[i].HdRowIndex < 8) { _spriteShifters[i].HdRowIndex++; }
+                        if(_spriteShifters[i].HdRowIndex >= 8) { _spriteShifters[i].HdRowActive = false; }
+                    }
+                }
 
-				if(!IsZoomedSpriteAllowed(i) || ((_spriteShifters[i].SpriteX - xPos) & 0x01)) {
-					_spriteShifters[i].TileData[0] <<= 1;
-					_spriteShifters[i].TileData[1] <<= 1;
-					_spriteShifters[i].TileData[2] <<= 1;
-					_spriteShifters[i].TileData[3] <<= 1;
-				}
+                if(sprColor != 0) {
+                    if(spriteDrawn) {
+                        _state.SpriteCollision |= _spriteShifters[i].HardwareSprite;
+                        continue;
+                    } else {
+                        spritePixelColor = sprColor;
+                        spriteDrawn = true;
+                        drawnSpriteIndex = i;
+                        drawnSpriteHdIdx = curHdIdx;
+                        drawnSpriteHasHd = curHasHd;
+                    }
+                }
+            } else {
+                uint8_t sprColor = ((_spriteShifters[i].TileData[0] >> 7) & 0x01);
+                // HD row sampling: snapshot index, then advance when shifter advances
+                uint8_t curHdIdx = _spriteShifters[i].HdRowIndex;
+                bool curHasHd = _spriteShifters[i].HdRowActive && (curHdIdx < 8);
+                bool advanceShifter = !_state.EnableDoubleSpriteSize || ((_spriteShifters[i].SpriteX - xPos) & 0x01);
+                if(advanceShifter) {
+                    _spriteShifters[i].TileData[0] <<= 1;
+                    if(_spriteShifters[i].HdRowActive) {
+                        if(_spriteShifters[i].HdRowIndex < 8) { _spriteShifters[i].HdRowIndex++; }
+                        if(_spriteShifters[i].HdRowIndex >= 8) { _spriteShifters[i].HdRowActive = false; }
+                    }
+                }
 
-				if(sprColor != 0) {
-					if(spriteDrawn) {
-						_state.SpriteCollision |= _spriteShifters[i].HardwareSprite;
-						continue;
-					} else {
-						spritePixelColor = sprColor;
-						spriteDrawn = true;
-					}
-				}
-			} else {
-				uint8_t sprColor = ((_spriteShifters[i].TileData[0] >> 7) & 0x01);
-				if(!_state.EnableDoubleSpriteSize || ((_spriteShifters[i].SpriteX - xPos) & 0x01)) {
-					_spriteShifters[i].TileData[0] <<= 1;
-				}
+                if(sprColor != 0) {
+                    if(spriteDrawn) {
+                        _state.SpriteCollision |= _spriteShifters[i].HardwareSprite;
+                        continue;
+                    } else {
+                        uint8_t spritePalette = _spriteShifters[i].TileData[1];
+                        if(spritePalette != 0) {
+                            spritePixelColor = spritePalette;
+                            spriteDrawn = true;
+                            drawnSpriteIndex = i;
+                            drawnSpriteHdIdx = curHdIdx;
+                            drawnSpriteHasHd = curHasHd;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
-				if(sprColor != 0) {
-					if(spriteDrawn) {
-						_state.SpriteCollision |= _spriteShifters[i].HardwareSprite;
-						continue;
-					} else {
-						uint8_t spritePalette = _spriteShifters[i].TileData[1];
-						if(spritePalette != 0) {
-							spritePixelColor = spritePalette;
-							spriteDrawn = true;
-						}
-					}
-				}
-			}
-		}
-	}
+    uint16_t hdPixel = 0;
+    bool haveHdPixel = false;
+    if(_state.UseMode4 && _hdBgRowActive && _hdBgRowRemaining > 0) {
+        uint8_t idx = (uint8_t)(8 - _hdBgRowRemaining);
+        if(idx < 8) { hdPixel = _hdBgRowPixels[idx]; haveHdPixel = true; }
+    }
 
-	if(_state.Cycle < _minDrawCycle) {
-		return _internalPaletteRam[0x10 | _state.BackgroundColorIndex];
-	}
-
-	uint8_t color = (
+    uint8_t color = (
 		((_bgShifters[0] >> 23) & 0x01) |
 		((_bgShifters[1] >> 22) & 0x02) |
 		((_bgShifters[2] >> 21) & 0x04) |
@@ -1219,19 +1297,46 @@ uint16_t SmsVdp::GetPixelColor()
 
 	bool highPriority = (_bgPriority & 0x800000);
 	if(!spriteDrawn || (highPriority && color != 0) || _disableSprites) {
-		uint8_t paletteOffset = (_bgPalette & 0x800000) ? 0x10 : 0;
-		if(_state.UseMode4) {
-			return _internalPaletteRam[paletteOffset + color];
-		} else {
-			return _activeSgPalette[color == 0 ? _state.BackgroundColorIndex : color];
-		}
-	}
+        uint8_t paletteOffset = (_bgPalette & 0x800000) ? 0x10 : 0;
+        if(_state.UseMode4) {
+            uint16_t out;
+            if(haveHdPixel) {
+                // Bit 15 set means transparent: fall back to SMS palette for this pixel
+                out = (hdPixel & 0x8000) ? _internalPaletteRam[paletteOffset + color] : (uint16_t)(hdPixel & 0x7FFF);
+            } else {
+                out = _internalPaletteRam[paletteOffset + color];
+            }
+            // Consume one HD row pixel to stay in sync with shifters
+            if(_hdBgRowActive && _hdBgRowRemaining > 0) { if(--_hdBgRowRemaining == 0) { _hdBgRowActive = false; } }
+            return out;
+        } else {
+            return _activeSgPalette[color == 0 ? _state.BackgroundColorIndex : color];
+        }
+    }
 
-	if(_state.UseMode4) {
-		return _internalPaletteRam[0x10 + spritePixelColor];
-	} else {
-		return _activeSgPalette[spritePixelColor];
-	}
+    if(_state.UseMode4) {
+        // Sprite drawn: still consume one BG HD row pixel to keep alignment
+        if(_hdBgRowActive && _hdBgRowRemaining > 0) { if(--_hdBgRowRemaining == 0) { _hdBgRowActive = false; } }
+        if(drawnSpriteHasHd && drawnSpriteIndex >= 0 && drawnSpriteHdIdx < 8) {
+            uint16_t spx = _spriteShifters[drawnSpriteIndex].HdRowPixels[drawnSpriteHdIdx];
+            // If sprite HD pixel is opaque, use it directly; if transparent, fall back to BG color (including BG HD if present)
+            if((spx & 0x8000) == 0) {
+                return (uint16_t)(spx & 0x7FFF);
+            } else {
+                // Fall back to BG composition (same as above branch)
+                uint8_t paletteOffset = (_bgPalette & 0x800000) ? 0x10 : 0;
+                if(haveHdPixel) {
+                    return (hdPixel & 0x8000) ? _internalPaletteRam[paletteOffset + color] : (uint16_t)(hdPixel & 0x7FFF);
+                } else {
+                    return _internalPaletteRam[paletteOffset + color];
+                }
+            }
+        }
+        // No sprite HD replacement: use SMS sprite palette
+        return _internalPaletteRam[0x10 + spritePixelColor];
+    } else {
+        return _activeSgPalette[spritePixelColor];
+    }
 }
 
 void SmsVdp::WriteRegister(uint8_t reg, uint8_t value)
@@ -1619,6 +1724,9 @@ void SmsVdp::Serialize(Serializer& s)
 			SVI(_spriteShifters[i].TileData[1]);
 			SVI(_spriteShifters[i].TileData[2]);
 			SVI(_spriteShifters[i].TileData[3]);
+			SVI(_spriteShifters[i].HdRowActive);
+			SVI(_spriteShifters[i].HdRowIndex);
+			SVArray(_spriteShifters[i].HdRowPixels, 8);
 		}
 
 		SV(_lastMasterClock);
@@ -1642,5 +1750,10 @@ void SmsVdp::Serialize(Serializer& s)
 
 		SV(_needCramDot);
 		SV(_cramDotColor);
+
+		// HD replacement (background row buffer)
+		SV(_hdBgRowActive);
+		SV(_hdBgRowRemaining);
+		SVArray(_hdBgRowPixels, 8);
 	}
 }

@@ -8,6 +8,7 @@
 #include "Shared/NotificationManager.h"
 #include "Utilities/FolderUtilities.h"
 #include "Utilities/Serializer.h"
+#include "SMS/HdPacks/SmsHdPackApi.h"
 
 EmuSettings::EmuSettings(Emulator* emu)
 {
@@ -251,7 +252,9 @@ PcEngineConfig& EmuSettings::GetPcEngineConfig()
 
 void EmuSettings::SetSmsConfig(SmsConfig& config)
 {
-	_sms = config;
+    _sms = config;
+    // Propagate SMS HD pack enable/disable to the runtime replacement system
+    SmsHdPackApi::SetHdReplacementEnabled(_sms.EnableHdPacks);
 }
 
 SmsConfig& EmuSettings::GetSmsConfig()

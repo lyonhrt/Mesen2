@@ -40,6 +40,8 @@
 							AvailableValues="{Binding AvailableRegionsGg}"
 						/>
 					</Grid>
+					<!-- Moved from Emulation -> Misc: Allow enabling HD packs (default ON) -->
+					<CheckBox IsChecked="{Binding Config.EnableHdPacks}" Content="{l:Translate chkEnableHdPacks}" />
 				</StackPanel>
 			</ScrollViewer>
 		</TabItem>
@@ -87,7 +89,6 @@
 							<TextBlock Text="{l:Translate lblSmsRevision}" />
 							<c:EnumComboBox SelectedItem="{Binding Config.Revision}" Width="200" />
 						</StackPanel>
-						<CheckBox IsChecked="{Binding Config.EnableHdPacks}" Content="{l:Translate chkEnableHdPacks}" />
 					</c:OptionSection>
 				</StackPanel>
 			</ScrollViewer>

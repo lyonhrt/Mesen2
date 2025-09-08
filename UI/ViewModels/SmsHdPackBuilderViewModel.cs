@@ -37,6 +37,8 @@ namespace Mesen.ViewModels
 			SaveFolder = Path.Join(ConfigManager.HdPackFolder, EmuApi.GetRomInfo().GetRomName());
 			ScaleLocked = false;
 			IsFilterEnabled = true;
+			// Sync UI with core recording state so closing/reopening window keeps recording active until user presses Stop
+			IsRecording = EmuApi.SmsIsHdPackRecording();
 
 			UpdateFilterDropdown();
 
