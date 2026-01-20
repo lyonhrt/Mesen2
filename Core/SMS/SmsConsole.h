@@ -3,6 +3,7 @@
 #include "Shared/Interfaces/IConsole.h"
 #include "Shared/SettingTypes.h"
 #include "SMS/SmsTypes.h"
+#include <array>
 
 class Emulator;
 class VirtualFile;
@@ -16,10 +17,13 @@ class SmsCart;
 class SmsControlManager;
 class SmsMemoryManager;
 class HdPackBuilderSms;
+class HdBuilderSmsVdp;
 
 struct HdPackBuilderOptions;
 struct ExecuteShortcutParams;
 enum class ConsoleNotificationType;
+struct HdScreenInfoSms;
+struct HdPackDataSms;
 
 class SmsConsole final : public IConsole
 {
@@ -33,34 +37,38 @@ private:
 	unique_ptr<SmsFmAudio> _fmAudio;
 	unique_ptr<SmsCart> _cart;
 	unique_ptr<HdPackBuilderSms> _hdPackBuilder;
+	unique_ptr<HdPackDataSms> _hdPackData;
+	HdBuilderSmsVdp* _hdVdp = nullptr;
+	std::array<std::unique_ptr<HdScreenInfoSms>, 2> _hdFrameBuffers;
+
 	RomFormat _romFormat = RomFormat::Sms;
 	SmsModel _model = SmsModel::Sms;
 	ConsoleRegion _region = ConsoleRegion::Ntsc;
 	string _filename;
-	
+
+	void InitCart(vector<uint8_t>& romData);
+
 	void UpdateRegion(bool forceUpdate);
 
 public:
-	static vector<string> GetSupportedExtensions() { return { ".sms", ".gg", ".sg", ".col" }; }
-	static vector<string> GetSupportedSignatures() { return { }; }
+	static vector<string> GetSupportedExtensions();
+	static vector<string> GetSupportedSignatures();
 
 	SmsConsole(Emulator* emu);
 	virtual ~SmsConsole();
 
-	Emulator* GetEmulator() { return _emu; }
-	SmsCpu* GetCpu() { return _cpu.get(); }
-	SmsVdp* GetVdp() { return _vdp.get(); }
-	SmsPsg* GetPsg() { return _psg.get(); }
-	SmsMemoryManager* GetMemoryManager() { return _memoryManager.get(); }
-
-	SmsModel GetModel() { return _model; }
-	SmsRevision GetRevision();
-
 	LoadRomResult LoadRom(VirtualFile& romFile) override;
 
+	HdBuilderSmsVdp* GetHdBuilderSmsVdp() const { return _hdVdp; }
+	SmsVdp* GetVdp() { return _vdp.get(); }
+	HdPackDataSms* GetHdPackData() { return _hdPackData.get(); }
+	SmsMemoryManager* GetMemoryManager() { return _memoryManager.get(); }
+	SmsModel GetModel() const { return _model; }
+	Emulator* GetEmulator() { return _emu; }
+	SmsCpu* GetCpu() { return _cpu.get(); }
+	SmsPsg* GetPsg() { return _psg.get(); }
+	SmsRevision GetRevision();
 	bool HasBios();
-
-	void InitCart(vector<uint8_t>& romData);
 
 	void Reset() override;
 	void RunFrame() override;
@@ -96,7 +104,6 @@ public:
 
 	void InitializeRam(void* data, uint32_t length);
 
-	// HD Pack recording support
 	void ProcessNotification(ConsoleNotificationType type, void* parameter);
 	void StartRecordingHdPack(HdPackBuilderOptions options);
 	void StopRecordingHdPack();

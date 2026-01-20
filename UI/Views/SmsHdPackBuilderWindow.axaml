@@ -123,6 +123,10 @@
             <CheckBox Content="Show palette information" 
                       IsChecked="{Binding Config.ShowPaletteInfo}"
                       IsEnabled="{Binding !IsRecording}" />
+            
+            <CheckBox Content="Draw tile borders on PNG sheets" 
+                      IsChecked="{Binding Config.DrawTileBorders}"
+                      IsEnabled="{Binding !IsRecording}" />
 
           </StackPanel>
         </c:GroupBox>

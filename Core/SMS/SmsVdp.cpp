@@ -5,6 +5,7 @@
 #include "SMS/SmsControlManager.h"
 #include "SMS/SmsMemoryManager.h"
 #include "SMS/HdPacks/SmsHdPackApi.h"
+#include "SMS/HdPacks/HdPackDebug.h"
 #include "Shared/Video/VideoDecoder.h"
 #include "Shared/Emulator.h"
 #include "Shared/EmuSettings.h"
@@ -12,9 +13,11 @@
 #include "Shared/RewindManager.h"
 #include "Shared/EventType.h"
 #include "Shared/NotificationManager.h"
+#include "Shared/MessageManager.h"
 #include "Shared/ColorUtilities.h"
 #include "Utilities/Serializer.h"
 #include "Utilities/RandomHelper.h"
+#include "Utilities/HexUtilities.h"
 #include "Debugger/SmsVdpTools.h"
 
 void SmsVdp::Init(Emulator* emu, SmsConsole* console, SmsCpu* cpu, SmsControlManager* controlManager, SmsMemoryManager* memoryManager)
@@ -30,6 +33,12 @@ void SmsVdp::Init(Emulator* emu, SmsConsole* console, SmsCpu* cpu, SmsControlMan
 	_currentOutputBuffer = _outputBuffers[0];
 	memset(_outputBuffers[0], 0, 256 * 240 * sizeof(uint16_t));
 	memset(_outputBuffers[1], 0, 256 * 240 * sizeof(uint16_t));
+	
+	// NES parity: Allocate double-buffered HD pixel info to prevent tearing
+	_hdPixelInfoBuffer0 = new HdPixelInfo[MaxPixelsPerFrame]();
+	_hdPixelInfoBuffer1 = new HdPixelInfo[MaxPixelsPerFrame]();
+	_hdPixelInfoWrite = _hdPixelInfoBuffer0;
+	_hdPixelInfoRead = _hdPixelInfoBuffer1;
 
 	//TODOSMS - this allows Impossible Mission to have a random stage on power on
 	//Without this, the bios runs in the exact same amount of time each time, causing
@@ -78,6 +87,8 @@ SmsVdp::~SmsVdp()
 	delete[] _videoRam;
 	delete[] _outputBuffers[0];
 	delete[] _outputBuffers[1];
+	delete[] _hdPixelInfoBuffer0;
+	delete[] _hdPixelInfoBuffer1;
 }
 
 void SmsVdp::Run(uint64_t runTo)
@@ -370,12 +381,14 @@ void SmsVdp::LoadBgTilesSms()
 			uint16_t tileIndex = ntData & 0x1FF;
 			// Store raw BG tile index from nametable for HD replacement lookups
 			_bgTileIndexRaw = tileIndex;
-			uint8_t tileRow = vMirror ? 7 - (y & 0x07) : (y & 0x07);
+			_bgLogicalRow = (y & 0x07);  // Store logical row before mirroring
+			uint8_t tileRow = vMirror ? 7 - _bgLogicalRow : _bgLogicalRow;
 
 			_bgPriority |= ((ntData & 0x1000) ? 0xFF : 0) << (16 - _pixelsAvailable);
 			_bgPalette |= ((ntData & 0x800) ? 0xFF : 0) << (16 - _pixelsAvailable);
 			_bgTileAddr = tileIndex * 32 + tileRow * 4;
 			_bgHorizontalMirror = (ntData & 0x200);
+			_bgVerticalMirror = vMirror;
 			break;
 		}
 
@@ -414,48 +427,52 @@ void SmsVdp::LoadBgTilesSms()
 			}
 
 			// 🎯 HD PACK INTEGRATION: Capture real SMS background tile data
+			// Always capture tile data for HD pack rendering (cheap operation)
 			if(!_disableBackground) {
 				// Collect the complete 32-byte SMS tile data
 				uint8_t tileData[32];
-				uint16_t baseTileAddr = _revision == SmsRevision::Sms1 ? ((_bgTileAddr & _state.BgPatternTableAddress) | (_bgTileAddr & 0x7FF)) : _bgTileAddr;
-				baseTileAddr &= ~3; // Align to tile boundary
+				uint16_t baseTileAddr = (_bgTileIndexRaw * 32) & 0x3FFF;
 				
 				// Read the complete 32-byte tile (8 rows x 4 bytes per row)
 				for(int i = 0; i < 32; i++) {
-					tileData[i] = _videoRam[baseTileAddr + i];
+					tileData[i] = _videoRam[(baseTileAddr + i) & 0x3FFF];
 				}
 				
-				// Get screen coordinates (where this tile will be drawn)
-				uint8_t x = (_state.Cycle & 0xF8); // Tile column * 8
-				uint16_t y = _state.Scanline;
+				// NES parity: Store tile key data for video filter to do lookup
+				// Determine palette base (0x00 for low palette, 0x10 for high palette)
+				uint8_t palBase = (_bgPalette & (0xFF << (16 - _pixelsAvailable))) ? 0x10 : 0x00;
 				
-				// Extract palette information from the tile attributes
-				uint32_t paletteColors = 0xFF000000; // Default alpha
-				if(_bgPalette & (0xFF << (16 - _pixelsAvailable))) {
-					// High palette (sprite palette)
-					paletteColors |= 0x00FFFF00; // Yellow tint for high palette
+				// Pack palette colors from CRAM
+				uint32_t paletteColors = 
+					((uint32_t)_paletteRam[palBase + 0]) |
+					((uint32_t)_paletteRam[palBase + 1] << 8) |
+					((uint32_t)_paletteRam[palBase + 2] << 16) |
+					((uint32_t)_paletteRam[palBase + 3] << 24);
+				
+				// Store tile key data for per-pixel storage
+				// Use logical row (before mirroring) - video filter will apply mirroring when sampling HD pixels
+				memcpy(_hdBgTileInfo.TileData, tileData, 32);
+				_hdBgTileInfo.PaletteColors = paletteColors;
+				_hdBgTileInfo.PaletteIndex = (palBase == 0x10) ? 1 : 0;
+				_hdBgTileInfo.HMirror = _bgHorizontalMirror;
+				_hdBgTileInfo.VMirror = _bgVerticalMirror;
+				_hdBgTileInfo.RowInTile = _bgLogicalRow;
+				_hdBgTileInfo.Valid = true;
+				
+				// For the first tile on the scanline, account for fine scroll offset
+				// The fine scroll offset is already consumed as border pixels
+				uint8_t fineScroll = 0;
+				if(_state.UseMode4 && !(_state.Scanline < 16 && _state.HorizontalScrollLock)) {
+					fineScroll = _state.HorizontalScrollLatch & 0x07;
+				}
+				
+				// First tile (cycle 0-7) starts at fine scroll column, others start at 0
+				if(cycle < 8) {
+					_hdBgTileInfo.StartColumn = fineScroll;
+					_hdBgTileInfo.PixelsRemaining = 8 - fineScroll;
 				} else {
-					// Low palette (background palette)  
-					paletteColors |= 0x0000FFFF; // Cyan tint for low palette
-				}
-				
-				// Call HD pack API to process this tile
-				SmsHdPackApi::ProcessSmsBackgroundTile(_emu, x, y, baseTileAddr, tileData, paletteColors, 
-													 _bgHorizontalMirror, false, (_bgPriority & (0xFF << (16 - _pixelsAvailable))) != 0);
-
-				// Prefetch HD replacement row for this tile row (for rendering)
-				if(SmsHdPackApi::IsHdReplacementEnabled()) {
-					int imgIdx; uint16_t srcX, srcY; uint32_t scale;
-					uint8_t palGroup = (_bgPalette & (0xFF << (16 - _pixelsAvailable))) ? 1 : 0;
-					// Use raw nametable tile index to match manifest entries
-					uint32_t tileIndex = _bgTileIndexRaw;
-					uint8_t rowWithinTile = (uint8_t)(((_bgTileAddr >> 2) & 0x07));
-					if(SmsHdPackApi::TryGetReplacementByIndex(tileIndex, false, palGroup, tileData, imgIdx, srcX, srcY, scale)) {
-						if(SmsHdPackApi::SampleReplacementRow8(imgIdx, srcX, srcY, scale, rowWithinTile, _bgHorizontalMirror, _hdBgRowPixels)) {
-							_hdBgRowActive = true;
-							_hdBgRowRemaining = 8;
-						}
-					}
+					_hdBgTileInfo.StartColumn = 0;
+					_hdBgTileInfo.PixelsRemaining = 8;
 				}
 			}
 
@@ -618,9 +635,39 @@ uint8_t SmsVdp::ReverseBitOrder(uint8_t val)
 
 void SmsVdp::DrawPixel()
 {
-	_currentOutputBuffer[_state.Scanline * 256 + GetVisiblePixelIndex()] = GetPixelColor();
+	int pixelX = GetVisiblePixelIndex();
+	int pixelIdx = _state.Scanline * 256 + pixelX;
+	
+	// NES parity: Store BG tile key data per-pixel for video filter to do lookup
+	if(_hdBgTileInfo.Valid && _hdBgTileInfo.PixelsRemaining > 0 && pixelIdx >= 0 && pixelIdx < MaxPixelsPerFrame) {
+		// Calculate logical column within tile (0-7 from left to right as displayed)
+		// StartColumn is the first column we draw (due to fine scroll on first tile)
+		// PixelsRemaining counts down, so we calculate how many pixels we've already drawn
+		// Don't apply mirroring here - that's done in the video filter when sampling HD pixels
+		uint8_t initialPixels = 8 - _hdBgTileInfo.StartColumn;  // Total pixels to draw for this tile
+		uint8_t pixelsDrawn = initialPixels - _hdBgTileInfo.PixelsRemaining;
+		uint8_t colInTile = _hdBgTileInfo.StartColumn + pixelsDrawn;
+		
+		HdPixelInfo& info = _hdPixelInfoWrite[pixelIdx];
+		memcpy(info.Bg.TileData, _hdBgTileInfo.TileData, 32);
+		info.Bg.PaletteColors = _hdBgTileInfo.PaletteColors;
+		info.Bg.PaletteIndex = _hdBgTileInfo.PaletteIndex;
+		info.Bg.TileX = colInTile;
+		info.Bg.TileY = _hdBgTileInfo.RowInTile;
+		info.Bg.HMirror = _hdBgTileInfo.HMirror;
+		info.Bg.VMirror = _hdBgTileInfo.VMirror;
+		info.Bg.HasTileData = true;
+		// ColorIndex will be set after GetPixelColor determines the final color
+		
+		_hdBgTileInfo.PixelsRemaining--;
+		if(_hdBgTileInfo.PixelsRemaining == 0) {
+			_hdBgTileInfo.Valid = false;
+		}
+	}
+	
+	_currentOutputBuffer[pixelIdx] = GetPixelColor();
 	if(_needCramDot) {
-		_currentOutputBuffer[_state.Scanline * 256 + GetVisiblePixelIndex()] = _cramDotColor;
+		_currentOutputBuffer[pixelIdx] = _cramDotColor;
 	}
 	_bgShifters[0] <<= 1;
 	_bgShifters[1] <<= 1;
@@ -694,6 +741,10 @@ void SmsVdp::ProcessEndOfScanline()
 
 		_emu->GetNotificationManager()->SendNotification(ConsoleNotificationType::PpuFrameDone);
 
+		// NES parity: Swap HD pixel buffers before sending frame to video decoder
+		// This ensures video filter reads completed frame while VDP writes to new frame
+		SwapHdPixelBuffers();
+		
 		RenderedFrame frame(_currentOutputBuffer, 256, 240, 1.0, _state.FrameCount, _console->GetControlManager()->GetPortStates());
 		bool rewinding = _emu->GetRewindManager()->IsRewinding();
 		_emu->GetVideoDecoder()->UpdateFrame(frame, rewinding, rewinding);
@@ -707,6 +758,9 @@ void SmsVdp::ProcessEndOfScanline()
 		_state.VerticalScrollLatch = _state.VerticalScroll;
 		_emu->ProcessEvent(EventType::StartFrame, CpuType::Sms);
 		_currentOutputBuffer = _currentOutputBuffer == _outputBuffers[0] ? _outputBuffers[1] : _outputBuffers[0];
+		
+		// Clear HD tile results for new frame
+		ClearHdTileResults();
 	}
 
 	_bgShifters[0] = 0;
@@ -715,10 +769,6 @@ void SmsVdp::ProcessEndOfScanline()
 	_bgShifters[3] = 0;
 	_bgPriority = 0;
 	_bgPalette = 0;
-
-	// Reset HD replacement row buffer at the start of the visible area
-	_hdBgRowActive = false;
-	_hdBgRowRemaining = 0;
 
 	uint8_t borderWidth = 0;
 	if(_state.UseMode4) {
@@ -874,47 +924,14 @@ void SmsVdp::LoadSpriteTilesSms()
 
 		case 6: case 18:
 		case 40: case 52:
-			//Load sprite N tile (2nd word)
+			// Load sprite N tile (2nd word)
 			_spriteShifters[_spriteCount].TileData[2] = ReadVram(_spriteShifters[_spriteCount].TileAddr + 2, SmsVdpMemAccess::SpriteLoadTile);
 			_spriteShifters[_spriteCount].TileData[3] = ReadVram(_spriteShifters[_spriteCount].TileAddr + 3, SmsVdpMemAccess::SpriteLoadTile);
 			
-			// 🎯 HD PACK INTEGRATION: Capture real SMS sprite tile data
-			if(!_disableSprites) {
-				// Collect the complete 32-byte SMS sprite tile data
-				uint8_t spriteTileData[32];
-				uint16_t spriteTileAddr = _spriteShifters[_spriteCount].TileAddr & ~3; // Align to 4-byte row boundary
-				
-				// Read the complete 32-byte tile (8 rows x 4 bytes per row)
-				for(int i = 0; i < 32; i++) {
-					spriteTileData[i] = _videoRam[spriteTileAddr + i];
-				}
-				
-				// Get sprite screen coordinates
-				uint32_t spriteX = _spriteShifters[_spriteCount].SpriteX;
-				uint32_t spriteY = _state.Scanline;
-				
-				// SMS sprites always use high palette (0x10-0x1F)
-				uint32_t spritePaletteColors = 0xFF00FF00; // Green tint for sprites
-				
-				// Call HD pack API to process this sprite tile
-				SmsHdPackApi::ProcessSmsSprite(_emu, spriteX, spriteY, spriteTileAddr, spriteTileData, spritePaletteColors);
-
-				// Prefetch HD replacement row for this sprite row (for rendering)
-				if(SmsHdPackApi::IsHdReplacementEnabled()) {
-					int imgIdx; uint16_t srcX, srcY; uint32_t scale;
-					uint32_t tileIndex = _spriteShifters[_spriteCount].RawTileIndex;
-					uint8_t rowWithinTile = _spriteShifters[_spriteCount].SpriteRow & 0x07;
-					if(SmsHdPackApi::TryGetReplacementByIndex(tileIndex, true, 1, spriteTileData, imgIdx, srcX, srcY, scale)) {
-						if(SmsHdPackApi::SampleReplacementRow8(imgIdx, srcX, srcY, scale, rowWithinTile, false, _spriteShifters[_spriteCount].HdRowPixels)) {
-							_spriteShifters[_spriteCount].HdRowActive = true;
-							_spriteShifters[_spriteCount].HdRowIndex = 0;
-						}
-					}
-				}
-			}
+			// HD pack: lookup replacement for this sprite
+			LookupSpriteHdReplacement(_spriteCount);
 			
 			if(_state.ShiftSpritesLeft) {
-				//Shift all sprites to the left by 8 pixels
 				ShiftSprite(_spriteCount);
 			}
 			break;
@@ -928,44 +945,12 @@ void SmsVdp::LoadSpriteTilesSms()
 
 		case 10: case 22:
 		case 44: case 56:
-			//Load sprite N+1 tile (2nd word)
+			// Load sprite N+1 tile (2nd word)
 			_spriteShifters[_spriteCount + 1].TileData[2] = ReadVram(_spriteShifters[_spriteCount + 1].TileAddr + 2, SmsVdpMemAccess::SpriteLoadTile);
 			_spriteShifters[_spriteCount + 1].TileData[3] = ReadVram(_spriteShifters[_spriteCount + 1].TileAddr + 3, SmsVdpMemAccess::SpriteLoadTile);
 			
-			// HD PACK INTEGRATION: Capture real SMS sprite tile data (N+1)
-			if(!_disableSprites) {
-				// Collect the complete 32-byte SMS sprite tile data
-				uint8_t spriteTileData[32];
-				uint16_t spriteTileAddr = _spriteShifters[_spriteCount + 1].TileAddr & ~3; // Align to tile boundary
-				
-				// Read the complete 32-byte tile (8 rows x 4 bytes per row)
-				for(int i = 0; i < 32; i++) {
-					spriteTileData[i] = _videoRam[spriteTileAddr + i];
-				}
-				
-				// Get sprite screen coordinates
-				uint32_t spriteX = _spriteShifters[_spriteCount + 1].SpriteX;
-				uint32_t spriteY = _state.Scanline;
-				
-				// SMS sprites always use high palette (0x10-0x1F)
-				uint32_t spritePaletteColors = 0xFF00FF00; // Green tint for sprites
-				
-				// Call HD pack API to process this sprite tile
-				SmsHdPackApi::ProcessSmsSprite(_emu, spriteX, spriteY, spriteTileAddr, spriteTileData, spritePaletteColors);
-
-				// Prefetch HD replacement row for this sprite row (for rendering)
-				if(SmsHdPackApi::IsHdReplacementEnabled()) {
-					int imgIdx; uint16_t srcX, srcY; uint32_t scale;
-					uint32_t tileIndex = (spriteTileAddr / 32);
-					uint8_t rowWithinTile = _spriteShifters[_spriteCount + 1].SpriteRow & 0x07;
-					if(SmsHdPackApi::TryGetReplacementByIndex(tileIndex, true, 1, spriteTileData, imgIdx, srcX, srcY, scale)) {
-						if(SmsHdPackApi::SampleReplacementRow8(imgIdx, srcX, srcY, scale, rowWithinTile, false, _spriteShifters[_spriteCount + 1].HdRowPixels)) {
-							_spriteShifters[_spriteCount + 1].HdRowActive = true;
-							_spriteShifters[_spriteCount + 1].HdRowIndex = 0;
-						}
-					}
-				}
-			}
+			// HD pack: lookup replacement for this sprite
+			LookupSpriteHdReplacement(_spriteCount + 1);
 			
 			if(_state.ShiftSpritesLeft) {
 				//Shift all sprites to the left by 8 pixels
@@ -1209,8 +1194,8 @@ uint16_t SmsVdp::GetPixelColor()
     bool spriteDrawn = false;
     uint8_t spritePixelColor = 0;
     int drawnSpriteIndex = -1;
-    uint8_t drawnSpriteHdIdx = 0;
-    bool drawnSpriteHasHd = false;
+    uint8_t drawnSpriteHdIdx = 0;  // Pixel position within sprite (0-7) for HD lookup
+    // NES parity: Track pixel position within sprite for HD tile lookup
     uint16_t xPos = GetVisiblePixelIndex();
     for(int i = 0; i < _spriteCount; i++) {
         if(xPos >= _spriteShifters[i].SpriteX && xPos < _spriteShifters[i].SpriteX + (8 << (uint8_t)IsZoomedSpriteAllowed(i))) {
@@ -1221,19 +1206,26 @@ uint16_t SmsVdp::GetPixelColor()
                     ((_spriteShifters[i].TileData[2] >> 5) & 0x04) |
                     ((_spriteShifters[i].TileData[3] >> 4) & 0x08)
                 );
-                // HD row sampling: snapshot current HD index, then advance index when shifters advance
-                uint8_t curHdIdx = _spriteShifters[i].HdRowIndex;
-                bool curHasHd = _spriteShifters[i].HdRowActive && (curHdIdx < 8);
-                bool advanceShifter = !IsZoomedSpriteAllowed(i) || ((_spriteShifters[i].SpriteX - xPos) & 0x01);
+                // Calculate pixel position within sprite (0-7)
+                uint8_t pixelInSprite = (uint8_t)(xPos - _spriteShifters[i].SpriteX);
+                if(IsZoomedSpriteAllowed(i)) {
+                    pixelInSprite >>= 1; // Zoomed sprites: 2 screen pixels per tile pixel
+                }
+                
+                bool advanceShifter = !IsZoomedSpriteAllowed(i) || ((xPos - _spriteShifters[i].SpriteX) & 0x01);
                 if(advanceShifter) {
                     _spriteShifters[i].TileData[0] <<= 1;
                     _spriteShifters[i].TileData[1] <<= 1;
                     _spriteShifters[i].TileData[2] <<= 1;
                     _spriteShifters[i].TileData[3] <<= 1;
-                    if(_spriteShifters[i].HdRowActive) {
-                        if(_spriteShifters[i].HdRowIndex < 8) { _spriteShifters[i].HdRowIndex++; }
-                        if(_spriteShifters[i].HdRowIndex >= 8) { _spriteShifters[i].HdRowActive = false; }
-                    }
+                }
+
+                // HD pack fix: Store sprite info for ALL pixels covered by sprite (not just non-transparent)
+                // This allows HD replacement PNG alpha to control transparency instead of original tile
+                if(drawnSpriteIndex < 0) {
+                    // First sprite covering this pixel - store for HD lookup even if transparent
+                    drawnSpriteIndex = i;
+                    drawnSpriteHdIdx = pixelInSprite;
                 }
 
                 if(sprColor != 0) {
@@ -1244,22 +1236,19 @@ uint16_t SmsVdp::GetPixelColor()
                         spritePixelColor = sprColor;
                         spriteDrawn = true;
                         drawnSpriteIndex = i;
-                        drawnSpriteHdIdx = curHdIdx;
-                        drawnSpriteHasHd = curHasHd;
+                        drawnSpriteHdIdx = pixelInSprite;
                     }
                 }
             } else {
                 uint8_t sprColor = ((_spriteShifters[i].TileData[0] >> 7) & 0x01);
-                // HD row sampling: snapshot index, then advance when shifter advances
-                uint8_t curHdIdx = _spriteShifters[i].HdRowIndex;
-                bool curHasHd = _spriteShifters[i].HdRowActive && (curHdIdx < 8);
-                bool advanceShifter = !_state.EnableDoubleSpriteSize || ((_spriteShifters[i].SpriteX - xPos) & 0x01);
+                uint8_t pixelInSprite = (uint8_t)(xPos - _spriteShifters[i].SpriteX);
+                if(_state.EnableDoubleSpriteSize) {
+                    pixelInSprite >>= 1;
+                }
+                
+                bool advanceShifter = !_state.EnableDoubleSpriteSize || ((xPos - _spriteShifters[i].SpriteX) & 0x01);
                 if(advanceShifter) {
                     _spriteShifters[i].TileData[0] <<= 1;
-                    if(_spriteShifters[i].HdRowActive) {
-                        if(_spriteShifters[i].HdRowIndex < 8) { _spriteShifters[i].HdRowIndex++; }
-                        if(_spriteShifters[i].HdRowIndex >= 8) { _spriteShifters[i].HdRowActive = false; }
-                    }
                 }
 
                 if(sprColor != 0) {
@@ -1272,8 +1261,7 @@ uint16_t SmsVdp::GetPixelColor()
                             spritePixelColor = spritePalette;
                             spriteDrawn = true;
                             drawnSpriteIndex = i;
-                            drawnSpriteHdIdx = curHdIdx;
-                            drawnSpriteHasHd = curHasHd;
+                            drawnSpriteHdIdx = pixelInSprite;
                         }
                     }
                 }
@@ -1281,13 +1269,8 @@ uint16_t SmsVdp::GetPixelColor()
         }
     }
 
-    uint16_t hdPixel = 0;
-    bool haveHdPixel = false;
-    if(_state.UseMode4 && _hdBgRowActive && _hdBgRowRemaining > 0) {
-        uint8_t idx = (uint8_t)(8 - _hdBgRowRemaining);
-        if(idx < 8) { hdPixel = _hdBgRowPixels[idx]; haveHdPixel = true; }
-    }
-
+    // NES parity: VDP just returns SMS palette colors
+    // Video filter will do HD lookup and overlay HD pixels
     uint8_t color = (
 		((_bgShifters[0] >> 23) & 0x01) |
 		((_bgShifters[1] >> 22) & 0x02) |
@@ -1296,43 +1279,75 @@ uint16_t SmsVdp::GetPixelColor()
 	);
 
 	bool highPriority = (_bgPriority & 0x800000);
+    uint8_t paletteOffset = (_bgPalette & 0x800000) ? 0x10 : 0;
+    int pixelIdx = _state.Scanline * 256 + xPos;
+    
+    // HD pack fix: Store sprite tile data for ALL pixels covered by a sprite
+    // This allows HD replacement PNG alpha to control transparency instead of original tile
+    if(_state.UseMode4 && drawnSpriteIndex >= 0 && pixelIdx >= 0 && pixelIdx < MaxPixelsPerFrame) {
+        SpriteShifter& sprite = _spriteShifters[drawnSpriteIndex];
+        HdPixelInfo& info = _hdPixelInfoWrite[pixelIdx];
+        
+        // Store BG color index (for rendering BG under sprite)
+        info.Bg.ColorIndex = paletteOffset + color;
+        
+        // Read 32-byte sprite tile data
+        // Calculate tile base using RawTileIndex and pattern selector
+        uint8_t spriteRow = sprite.SpriteRow;
+        uint8_t tileY = spriteRow & 0x07;
+        
+        // Get pattern selector base and calculate tile address
+        uint16_t patternBase = _state.SpritePatternSelector & 0x2000;
+        uint16_t tileIndex = sprite.RawTileIndex;
+        
+        // For tall sprites, determine which 8x8 tile we're in
+        if(_state.UseLargeSprites && spriteRow >= 8) {
+            // Bottom half of tall sprite - use next tile
+            tileIndex = (tileIndex + 1) & 0xFF;
+            tileY = spriteRow - 8;
+        }
+        
+        uint16_t tileBaseAddr = patternBase | (tileIndex << 5);
+        
+        for(int i = 0; i < 32; i++) {
+            info.Sprite.TileData[i] = _videoRam[(tileBaseAddr + i) & 0x3FFF];
+        }
+        
+        // Pack sprite palette colors (0x10-0x13)
+        info.Sprite.PaletteColors = 
+            ((uint32_t)_paletteRam[0x10]) |
+            ((uint32_t)_paletteRam[0x11] << 8) |
+            ((uint32_t)_paletteRam[0x12] << 16) |
+            ((uint32_t)_paletteRam[0x13] << 24);
+        info.Sprite.PaletteIndex = 1;  // Sprites always use high palette
+        
+        info.Sprite.TileX = drawnSpriteHdIdx;
+        info.Sprite.TileY = tileY;
+        info.Sprite.HMirror = false;
+        info.Sprite.VMirror = false;
+        info.Sprite.HasTileData = true;
+        info.Sprite.ColorIndex = 0x10 + spritePixelColor;  // Sprite palette offset (0 if transparent)
+        info.HasSprite = true;
+    }
+    
 	if(!spriteDrawn || (highPriority && color != 0) || _disableSprites) {
-        uint8_t paletteOffset = (_bgPalette & 0x800000) ? 0x10 : 0;
-        if(_state.UseMode4) {
-            uint16_t out;
-            if(haveHdPixel) {
-                // Bit 15 set means transparent: fall back to SMS palette for this pixel
-                out = (hdPixel & 0x8000) ? _internalPaletteRam[paletteOffset + color] : (uint16_t)(hdPixel & 0x7FFF);
-            } else {
-                out = _internalPaletteRam[paletteOffset + color];
+        // Store BG color index for fallback rendering in HD video filter
+        if(pixelIdx >= 0 && pixelIdx < MaxPixelsPerFrame) {
+            _hdPixelInfoWrite[pixelIdx].Bg.ColorIndex = paletteOffset + color;
+            // Keep HasSprite if we stored sprite data above for HD replacement
+            if(drawnSpriteIndex < 0) {
+                _hdPixelInfoWrite[pixelIdx].HasSprite = false;
             }
-            // Consume one HD row pixel to stay in sync with shifters
-            if(_hdBgRowActive && _hdBgRowRemaining > 0) { if(--_hdBgRowRemaining == 0) { _hdBgRowActive = false; } }
-            return out;
+        }
+        if(_state.UseMode4) {
+            return _internalPaletteRam[paletteOffset + color];
         } else {
             return _activeSgPalette[color == 0 ? _state.BackgroundColorIndex : color];
         }
     }
 
     if(_state.UseMode4) {
-        // Sprite drawn: still consume one BG HD row pixel to keep alignment
-        if(_hdBgRowActive && _hdBgRowRemaining > 0) { if(--_hdBgRowRemaining == 0) { _hdBgRowActive = false; } }
-        if(drawnSpriteHasHd && drawnSpriteIndex >= 0 && drawnSpriteHdIdx < 8) {
-            uint16_t spx = _spriteShifters[drawnSpriteIndex].HdRowPixels[drawnSpriteHdIdx];
-            // If sprite HD pixel is opaque, use it directly; if transparent, fall back to BG color (including BG HD if present)
-            if((spx & 0x8000) == 0) {
-                return (uint16_t)(spx & 0x7FFF);
-            } else {
-                // Fall back to BG composition (same as above branch)
-                uint8_t paletteOffset = (_bgPalette & 0x800000) ? 0x10 : 0;
-                if(haveHdPixel) {
-                    return (hdPixel & 0x8000) ? _internalPaletteRam[paletteOffset + color] : (uint16_t)(hdPixel & 0x7FFF);
-                } else {
-                    return _internalPaletteRam[paletteOffset + color];
-                }
-            }
-        }
-        // No sprite HD replacement: use SMS sprite palette
+        // Return SMS sprite palette color (video filter will overlay HD if found)
         return _internalPaletteRam[0x10 + spritePixelColor];
     } else {
         return _activeSgPalette[spritePixelColor];
@@ -1651,6 +1666,39 @@ void SmsVdp::InitGgPowerOnState()
 	}
 }
 
+void SmsVdp::LookupSpriteHdReplacement(uint8_t spriteIndex)
+{
+	// NES parity: No lookup in VDP - video filter does the lookup
+	// This function is now a no-op; tile key data is stored per-pixel in GetPixelColor
+	(void)spriteIndex;
+}
+
+void SmsVdp::ClearHdTileResults()
+{
+	for(int i = 0; i < MaxHdTilesPerFrame; i++) {
+		_hdBgTiles[i].Valid = false;
+	}
+	for(int i = 0; i < 128; i++) {
+		_hdSpriteTiles[i].Valid = false;
+	}
+	// Clear per-pixel HD info (NES parity: just clear the valid flags)
+	for(int i = 0; i < MaxPixelsPerFrame; i++) {
+		_hdPixelInfoWrite[i].Bg.HasTileData = false;
+		_hdPixelInfoWrite[i].Sprite.HasTileData = false;
+		_hdPixelInfoWrite[i].HasSprite = false;
+	}
+	// Clear current BG tile info
+	_hdBgTileInfo.Valid = false;
+	_hdBgTileInfo.PixelsRemaining = 0;
+}
+
+void SmsVdp::SwapHdPixelBuffers()
+{
+	// NES parity: Swap read/write buffers at frame end
+	// Video filter reads from the completed frame while VDP writes to the new frame
+	std::swap(_hdPixelInfoWrite, _hdPixelInfoRead);
+}
+
 void SmsVdp::Serialize(Serializer& s)
 {
 	SVArray(_videoRam, 0x4000);
@@ -1724,9 +1772,6 @@ void SmsVdp::Serialize(Serializer& s)
 			SVI(_spriteShifters[i].TileData[1]);
 			SVI(_spriteShifters[i].TileData[2]);
 			SVI(_spriteShifters[i].TileData[3]);
-			SVI(_spriteShifters[i].HdRowActive);
-			SVI(_spriteShifters[i].HdRowIndex);
-			SVArray(_spriteShifters[i].HdRowPixels, 8);
 		}
 
 		SV(_lastMasterClock);
@@ -1750,10 +1795,5 @@ void SmsVdp::Serialize(Serializer& s)
 
 		SV(_needCramDot);
 		SV(_cramDotColor);
-
-		// HD replacement (background row buffer)
-		SV(_hdBgRowActive);
-		SV(_hdBgRowRemaining);
-		SVArray(_hdBgRowPixels, 8);
 	}
 }

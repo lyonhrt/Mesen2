@@ -6,10 +6,31 @@
 #include <string>
 
 class Emulator;
+class VirtualFile;
+struct HdPackDataSms;
 
 // Minimal SMS HD pack loader for hires.txt (HDNes-style for SMS)
 // Maps runtime tiles to replacement image regions.
 class SmsHdPackLoader {
+private:
+    HdPackDataSms* _data = nullptr;
+    std::string _hdPackFolder;
+    int _currentLine = 0;
+    int _errorCount = 0;
+    std::unordered_map<std::string, uint32_t> _imageIndexByName;
+
+    SmsHdPackLoader();
+    bool InitializeLoader(VirtualFile& romFile, HdPackDataSms* data);
+    bool LoadFile(std::string filename, std::vector<uint8_t>& fileData);
+    bool CheckFile(std::string filename);
+    bool LoadPack();
+    void ProcessTileTag(const std::vector<std::string>& tokens);
+
+public:
+    // Static loader functions (like NES HdPackLoader)
+    static bool LoadHdSmsPack(std::string definitionFile, HdPackDataSms& outData);
+    static bool LoadHdSmsPack(VirtualFile& romFile, HdPackDataSms& outData);
+
 public:
     struct Image {
         std::string Filename;

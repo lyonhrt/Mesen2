@@ -22,17 +22,64 @@ enum class SmsVdpMemAccess : uint8_t
 	CpuSlot = 6
 };
 
-class SmsVdp final : public ISerializable
+class SmsVdp : public ISerializable
 {
 public:
 	static constexpr int SmsVdpLeftBorder = 8;
+
+	// HD tile info per screen tile (32x24 tiles for 256x192, or 32x30 for 256x240)
+	// Stores lookup result so video filter can render at full scale
+	struct HdTileResult {
+		int ImgIndex = -1;
+		uint16_t SrcX = 0;
+		uint16_t SrcY = 0;
+		bool HMirror = false;
+		bool VMirror = false;
+		bool IsSprite = false;
+		bool Valid = false;
+	};
+	static constexpr int MaxHdTilesPerFrame = 32 * 30; // 32 columns x 30 rows max
+
+	// Current BG tile info for per-pixel storage (NES parity: stores tile key data)
+	struct HdBgTileInfo {
+		uint8_t TileData[32] = {};   // 32-byte tile pattern
+		uint32_t PaletteColors = 0;  // Packed palette colors
+		uint8_t PaletteIndex = 0;    // 0 = low palette, 1 = high palette
+		bool HMirror = false;
+		bool VMirror = false;
+		uint8_t RowInTile = 0;
+		bool Valid = false;
+		uint8_t PixelsRemaining = 0;
+		uint8_t StartColumn = 0;     // Starting column within tile (for fine scroll)
+	};
+
+	// Per-pixel tile info for video filter (NES parity)
+	// Stores tile key data so video filter can do the HD lookup
+	struct HdTilePixelInfo {
+		uint8_t TileData[32] = {};  // 32-byte tile pattern
+		uint32_t PaletteColors = 0; // Packed palette colors
+		uint8_t TileX = 0;          // X position within tile (0-7)
+		uint8_t TileY = 0;          // Y position within tile (0-7)
+		uint8_t ColorIndex = 0;     // Palette color index (0-31) for fallback rendering
+		uint8_t PaletteIndex = 0;   // 0 = low palette, 1 = high palette (for HD pack lookup)
+		bool HMirror = false;
+		bool VMirror = false;
+		bool HasTileData = false;   // True if tile data is valid
+	};
+	
+	struct HdPixelInfo {
+		HdTilePixelInfo Bg;         // Background tile info
+		HdTilePixelInfo Sprite;     // Sprite tile info (if sprite is visible at this pixel)
+		bool HasSprite = false;     // True if a sprite is visible at this pixel
+	};
+	static constexpr int MaxPixelsPerFrame = 256 * 240;
 
 	// Debug accessor for HD pack development
 	uint8_t DebugReadVram(uint16_t addr) const {
 		return _videoRam[addr & 0x3FFF];
 	}
 
-private:
+protected:
 	Emulator* _emu = nullptr;
 	SmsConsole* _console = nullptr;
 	SmsCpu* _cpu = nullptr;
@@ -77,11 +124,22 @@ private:
 	uint16_t _minDrawCycle = 0;
 	uint8_t _pixelsAvailable = 0;
 	bool _bgHorizontalMirror = false;
+	bool _bgVerticalMirror = false;
+	uint8_t _bgLogicalRow = 0;  // Logical row within tile (0-7, before mirroring)
 
-	// HD replacement (background) - active row buffer
-	bool _hdBgRowActive = false;
-	uint16_t _hdBgRowPixels[8] = {};
-	uint8_t _hdBgRowRemaining = 0;
+	// NES parity: Current BG tile info for per-pixel storage
+	HdBgTileInfo _hdBgTileInfo = {};
+
+	HdTileResult _hdBgTiles[MaxHdTilesPerFrame] = {};
+	HdTileResult _hdSpriteTiles[64 * 2] = {}; // Up to 64 sprites, 2 tiles each (tall sprites)
+	
+	// NES parity: Double-buffered HD pixel info to prevent tearing
+	// VDP writes to _hdPixelInfoWrite, video filter reads from _hdPixelInfoRead
+	// Dynamically allocated to avoid compiler heap issues with large static arrays
+	HdPixelInfo* _hdPixelInfoBuffer0 = nullptr;
+	HdPixelInfo* _hdPixelInfoBuffer1 = nullptr;
+	HdPixelInfo* _hdPixelInfoWrite = nullptr;  // VDP writes here
+	HdPixelInfo* _hdPixelInfoRead = nullptr;   // Video filter reads here
 
 	struct SpriteShifter
 	{
@@ -94,11 +152,6 @@ private:
 		// Raw sprite tile index read from sprite table (without pattern base),
 		// used for HD replacement key to match manifest indices
 		uint16_t RawTileIndex = 0;
-
-		// HD replacement (per-sprite row buffer)
-		bool HdRowActive = false;
-		uint8_t HdRowIndex = 0; // 0..8
-		uint16_t HdRowPixels[8] = {};
 	};
 
 	uint8_t _evalCounter = 0;
@@ -151,27 +204,30 @@ private:
 	__forceinline void ProcessForcedBlankVblank();
 
 	int GetVisiblePixelIndex();
-	__forceinline void LoadBgTilesSms();
-	void LoadBgTilesSg();
+	virtual void LoadBgTilesSms();
+	virtual void LoadBgTilesSg();
 	void LoadBgTilesSgTextMode();
 	void PushBgPixel(uint8_t color, int index);
 	
-	__forceinline void DrawPixel();
+	virtual void DrawPixel();
 
 	void ProcessScanlineEvents();
-	void ProcessEndOfScanline();
+	virtual void ProcessEndOfScanline();
 
 	__forceinline void ProcessSpriteEvaluation();
 
 	uint16_t GetSmsSpriteTileAddr(uint8_t sprTileIndex, uint8_t spriteRow, uint8_t i);
-	void LoadSpriteTilesSms();
+	virtual void LoadSpriteTilesSms();
 	void LoadExtraSpritesSms();
 	__forceinline uint16_t GetPixelColor();
 
-	void LoadSpriteTilesSg();
+	virtual void LoadSpriteTilesSg();
 	void LoadExtraSpritesSg();
 	void ShiftSprite(uint8_t sprIndex);
 	void ShiftSpriteSg(uint8_t sprIndex);
+
+	// HD pack helper: lookup and cache sprite HD replacement
+	void LookupSpriteHdReplacement(uint8_t spriteIndex);
 
 	__forceinline bool IsZoomedSpriteAllowed(int spriteIndex);
 
@@ -186,7 +242,7 @@ private:
 
 public:
 	void Init(Emulator* emu, SmsConsole* console, SmsCpu* cpu, SmsControlManager* controlManager, SmsMemoryManager* memoryManager);
-	~SmsVdp();
+	virtual ~SmsVdp();
 
 	void Run(uint64_t runTo);
 
@@ -219,6 +275,13 @@ public:
 	{
 		return previousBuffer ? ((_currentOutputBuffer == _outputBuffers[0]) ? _outputBuffers[1] : _outputBuffers[0]) : _currentOutputBuffer;
 	}
+
+	// HD tile result accessors for video filter
+	const HdTileResult* GetHdBgTiles() const { return _hdBgTiles; }
+	const HdTileResult* GetHdSpriteTiles() const { return _hdSpriteTiles; }
+	const HdPixelInfo* GetHdPixelInfo() const { return _hdPixelInfoRead; }  // Video filter reads from read buffer
+	void ClearHdTileResults();
+	void SwapHdPixelBuffers();  // Swap read/write buffers at frame end
 
 	void Serialize(Serializer& s) override;
 };

@@ -4,6 +4,7 @@
 class Emulator;
 class SmsConsole;
 struct HdPackBuilderOptions;
+struct HdPackDataSms;
 
 // Simple API for SMS HD pack dumping - auto-start and save on power-off
 namespace SmsHdPackApi {
@@ -17,12 +18,9 @@ namespace SmsHdPackApi {
     void StartRecording(Emulator* emu, HdPackBuilderOptions options);
     void StopRecording(Emulator* emu);
     
-    // Real VDP integration functions - called from SmsVdp during rendering
-    void ProcessSmsBackgroundTile(Emulator* emu, uint32_t x, uint32_t y, uint32_t tileAddr, 
-                                 uint8_t* tileData, uint32_t paletteColors, bool hMirror, bool vMirror, bool priority);
-    void ProcessSmsSprite(Emulator* emu, uint32_t x, uint32_t y, uint32_t tileAddr,
-                         uint8_t* tileData, uint32_t paletteColors);
-                         
+    // Frame-based capture integration (called when a frame is ready)
+    void ProcessFrameIfReady(Emulator* emu);
+
     // Check if currently dumping
     bool IsCurrentlyDumping();
 
@@ -38,6 +36,9 @@ namespace SmsHdPackApi {
     // Enable/disable HD tile replacement (does not affect tile dumping)
     void SetHdReplacementEnabled(bool enabled);
     bool IsHdReplacementEnabled();
+
+    // Check if HD pack is loaded and ready for rendering
+    bool IsHdPackLoaded();
 
     // Lookup replacement by VRAM tile index/palette group
     // palGroup: 0 = BG low palette, 1 = BG high or any sprite
@@ -56,4 +57,15 @@ namespace SmsHdPackApi {
     // - outPixels8: returns 8 RGB555 pixels ready for the output buffer
     bool SampleReplacementRow8(int imgIndex, uint16_t srcX, uint16_t srcY, uint32_t scale,
                                uint8_t rowWithinTile, bool hMirror, uint16_t* outPixels8);
+    
+    // Get image data for direct pixel access
+    // Returns pointer to ARGB pixel data and dimensions
+    bool GetImageData(int imgIndex, const uint32_t*& outPixels, uint32_t& outWidth, uint32_t& outHeight);
+    
+    // Get the HD pack scale
+    uint32_t GetHdPackScale();
+    
+    // Get the loaded HD pack data (for use by SmsHdPack renderer)
+    // Returns nullptr if no pack is loaded
+    struct HdPackDataSms* GetHdPackData();
 }

@@ -45,6 +45,11 @@ struct HdPackConditionSms
 	virtual string ToString() = 0;
 	virtual bool IsExcludedFromFile() { return false; }
 
+	void Initialize(HdScreenInfoSms* screenInfo) {
+		_screenInfo = screenInfo;
+		_resultCache = -1;
+	}
+
 	bool CheckCondition(int x, int y, HdPackTileInfoSms* tile);
 	void ClearCache();
 

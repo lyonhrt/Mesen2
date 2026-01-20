@@ -7,6 +7,8 @@
 #include "SMS/SmsFmAudio.h"
 #include "SMS/SmsMemoryManager.h"
 #include "SMS/SmsDefaultVideoFilter.h"
+#include "SMS/HdPacks/HdBuilderSmsVdp.h"
+#include "SMS/HdPacks/SmsHdVideoFilter.h"
 #include "SMS/SmsNtscFilter.h"
 #include "SMS/SmsTypes.h"
 #include "SMS/Carts/SmsSegaCart.h"
@@ -19,11 +21,23 @@
 #include "Shared/FirmwareHelper.h"
 #include "SMS/HdPacks/HdPackBuilderSms.h"
 #include "SMS/HdPacks/SmsHdPackApi.h"
+#include "SMS/HdPacks/SmsHdPackLoader.h"
+#include "SMS/HdPacks/HdDataSms.h"
 #include "Shared/SaveStateManager.h"
 #include "Shared/Video/VideoDecoder.h"
 #include "Utilities/Serializer.h"
 #include "Utilities/StringUtilities.h"
 #include "Utilities/CRC32.h"
+
+vector<string> SmsConsole::GetSupportedExtensions()
+{
+	return { ".sms", ".gg", ".sg", ".sc", ".mv", ".col" };
+}
+
+vector<string> SmsConsole::GetSupportedSignatures()
+{
+	return { "sms", "gg", "sg1000", "colecovision" };
+}
 
 // Interop struct matching the UI's HdPackBuilderOptions layout (UI/Config/HdPackBuilderConfig.cs)
 // This is used only to safely deserialize ParamPtr from ExecuteShortcut and then convert
@@ -38,6 +52,7 @@ struct SmsHdPackInteropOptions {
     bool GroupBlankTiles;
     bool IgnoreOverscan;
     bool GroupRelatedSpriteTiles;
+    bool DrawTileBorders;
 };
 
 SmsConsole::SmsConsole(Emulator* emu)
@@ -78,7 +93,9 @@ LoadRomResult SmsConsole::LoadRom(VirtualFile& romFile)
             _model = SmsModel::Sms;
         }
         
-        _vdp.reset(new SmsVdp());
+        MessageManager::Log("[SMS Console] Creating HdBuilderSmsVdp!");
+        _vdp.reset(new HdBuilderSmsVdp());
+        MessageManager::Log("[SMS Console] HdBuilderSmsVdp created successfully!");
         _memoryManager.reset(new SmsMemoryManager());
         _cpu.reset(new SmsCpu());
         _psg.reset(new SmsPsg(_emu, this));
@@ -95,10 +112,25 @@ LoadRomResult SmsConsole::LoadRom(VirtualFile& romFile)
         }
 
         _memoryManager->Init(_emu, this, romData, biosRom, _vdp.get(), _controlManager.get(), _cart.get(), _psg.get(), _fmAudio.get());
-        _vdp->Init(_emu, this, _cpu.get(), _controlManager.get(), _memoryManager.get());
+        
+        // Check if we're using HdBuilderSmsVdp before calling Init
+        if(auto hdVdp = dynamic_cast<HdBuilderSmsVdp*>(_vdp.get())) {
+            _hdVdp = hdVdp;
+            _hdFrameBuffers[0] = std::make_unique<HdScreenInfoSms>();
+            _hdFrameBuffers[1] = std::make_unique<HdScreenInfoSms>();
+            _hdVdp->SetHdBuffers(_hdFrameBuffers[0].get(), _hdFrameBuffers[1].get());
+            // Call the HdBuilderSmsVdp-specific Init with 6 params
+            _hdVdp->Init(_emu, this, _cpu.get(), _controlManager.get(), _memoryManager.get(), false);
+        } else {
+            // Call base VDP Init with 5 params
+            _vdp->Init(_emu, this, _cpu.get(), _controlManager.get(), _memoryManager.get());
+        }
         _cpu->Init(_emu, this, _memoryManager.get());
 
         UpdateRegion(true);
+
+        // Load HD pack if available
+        SmsHdPackApi::LoadHdPackIfAvailable(_emu);
 
         return LoadRomResult::Success;
     }
@@ -188,6 +220,9 @@ void SmsConsole::ProcessEndOfFrame()
 {
     _controlManager->UpdateControlDevices();
     _controlManager->UpdateInputState();
+
+    // Drive HD pack frame processing once per VDP frame
+    SmsHdPackApi::ProcessFrameIfReady(_emu);
 }
 
 void SmsConsole::UpdateRegion(bool forceUpdate)
@@ -284,6 +319,11 @@ BaseVideoFilter* SmsConsole::GetVideoFilter(bool getDefaultFilter)
 {
     if(getDefaultFilter) {
         return new SmsDefaultVideoFilter(_emu, this);
+    }
+
+    // Use HD video filter if HD pack is loaded (via API or _hdPackData)
+    if(SmsHdPackApi::IsHdPackLoaded() || _hdPackData) {
+        return new SmsHdVideoFilter(this, _emu, _hdPackData.get());
     }
 
     VideoFilterType filterType = _emu->GetSettings()->GetVideoConfig().VideoFilter;
@@ -385,12 +425,14 @@ void SmsConsole::ProcessNotification(ConsoleNotificationType type, void* paramet
                 HdPackBuilderOptions options = {};
                 if(interop) {
                     options.SaveFolder = interop->SaveFolder ? std::string(interop->SaveFolder) : std::string();
+                    options.FilterType = interop->FilterType;
                     options.Scale = interop->Scale;
                     options.VramBankSize = interop->ChrRamBankSize;
                     options.GroupBlankTiles = interop->GroupBlankTiles;
                     options.SortByUsageFrequency = interop->SortByUsageFrequency;
                     options.IgnoreOverscan = interop->IgnoreOverscan;
                     options.GroupRelatedSpriteTiles = interop->GroupRelatedSpriteTiles;
+                    options.DrawTileBorders = interop->DrawTileBorders;
                 }
                 StartRecordingHdPack(options);
                 break;
@@ -408,6 +450,9 @@ void SmsConsole::StartRecordingHdPack(HdPackBuilderOptions options)
 
     // Forward to global SMS HD pack API so VDP tile hooks honor recording state
     SmsHdPackApi::StartRecording(_emu, options);
+    if(_hdVdp) {
+        _hdVdp->SetHdCaptureEnabled(true);
+    }
 
     _emu->GetVideoDecoder()->ForceFilterUpdate();
 }
@@ -420,6 +465,9 @@ void SmsConsole::StopRecordingHdPack()
 
     // Forward to global SMS HD pack API so recorded data is saved and state cleared
     SmsHdPackApi::StopRecording(_emu);
+    if(_hdVdp) {
+        _hdVdp->SetHdCaptureEnabled(false);
+    }
 
     _emu->GetVideoDecoder()->ForceFilterUpdate();
 }

@@ -25,6 +25,7 @@ class SmsVdp;
 
 struct HdPackBuilderOptions {
     string SaveFolder;
+    ScaleFilterType FilterType = ScaleFilterType::Prescale;
     uint32_t Scale = 1;
     uint32_t VramBankSize = 0x1000;
     bool GroupBlankTiles = false;
@@ -42,6 +43,8 @@ struct HdPackBuilderOptions {
     bool ShowTileGrid = false;         // Show grid lines around tiles in output
     bool TraceSprites = false;       // Special debug for sprite rendering issues
     bool VerboseLogging = false;       // Extra verbose logging for all operations
+    bool UseNesStylePipeline = false;  // Route ProcessTile through simplified NES-style pipeline
+    bool DrawTileBorders = false;      // Draw borders around tiles in PNG sheets
 };
 
 class HdPackBuilderSms {
@@ -85,6 +88,7 @@ private:
     // Private utility methods for better modularity
     void InitializeHdPackData();
     void LogInitializationInfo();
+    bool LoadExistingPack();  // NES parity: Load existing tiles from hires.txt and PNGs
     void InitializeDefaultSmsPalette();
     uint32_t ExtractPixelFromBitplanes(uint8_t plane0, uint8_t plane1, uint8_t plane2, uint8_t plane3, int pixelX);
     void ProcessTileRow(HdPackTileInfoSms* tile, int rowY, uint8_t* tileData);
@@ -97,6 +101,11 @@ private:
     uint32_t _uniqueSpriteCount = 0;
     uint32_t _uniqueBgCount = 0;
     bool _hdPackSaved = false;
+    
+    // NES parity: Blank tile grouping
+    uint32_t _blankTileIndex = 0;
+    uint32_t _blankTilePalette = 0;
+    uint32_t _blankTileCount = 0;  // Count of blank tiles encountered
 
 public:
     HdPackBuilderSms(Emulator* emu, SmsConsole* console, HdPackBuilderOptions options);
@@ -104,6 +113,7 @@ public:
 
     void ProcessTile(uint32_t cycle, uint32_t scanline, uint32_t tileAddr, HdTileKeySms& tile, 
                     bool isSprite, uint32_t bankHash, bool hasBgSprite);
+    void ProcessFrame(HdScreenInfoSms* frameInfo);
     
     // Recording workflow methods
     void StartRecording();
@@ -128,6 +138,7 @@ private:
     vector<HdPackTileInfoSms*> FilterValidTiles(const vector<HdPackTileInfoSms*>& inputTiles, bool isSprite);
     void CreateTileSheets(const vector<HdPackTileInfoSms*>& tiles, const string& saveFolder, const string& filename, bool isSprite);
     void DrawTileToBuffer(HdPackTileInfoSms* tile, int gridX, int gridY, uint32_t* pngBuffer, int pngWidth, int tileSize);
+    void DrawTileBorder(int gridX, int gridY, uint32_t* pngBuffer, int pngWidth, int tileSize, uint32_t color);
     string GenerateSheetFilename(const string& baseFilename, int sheetIndex, int totalSheets);
     
     // GenerateHdTile helper functions for better modularity
@@ -135,6 +146,8 @@ private:
     uint32_t GetPixelColor(uint8_t colorIndex, HdPackTileInfoSms* tile);
     void ProcessTilePixels(HdPackTileInfoSms* tile, const uint8_t* tileData);
     void ApplyDebugEffects(HdPackTileInfoSms* tile);
+    void ApplyPrescale(const std::vector<uint32_t>& src, std::vector<uint32_t>& dst, int scale);
+    void ProcessTileNesStyle(HdTileKeySms& key, uint32_t tileAddr, bool isSprite, bool transparencyRequired = false);
     
     // UpdatePalette helper functions for better modularity
     bool ValidateVdpAndSetDefaults();
@@ -177,7 +190,4 @@ private:
     struct SheetTileRef { HdPackTileInfoSms* Tile; uint16_t X; uint16_t Y; };
     struct SheetInfo { string Filename; bool IsSprite; std::vector<SheetTileRef> Tiles; };
     std::vector<SheetInfo> _sheetInfos;
-
-    // Manifest helpers
-    void TryOverrideScaleFromExistingManifest();
 };

@@ -860,8 +860,11 @@
     <ClCompile Include="SMS\SmsVdp.cpp" />
     <ClCompile Include="SMS\HdPacks\SmsHdPackApi.cpp" />
     <ClCompile Include="SMS\HdPacks\HdPackBuilderSms.cpp" />
+    <ClCompile Include="SMS\HdPacks\HdBuilderSmsVdp.cpp" />
     <ClCompile Include="SMS\HdPacks\SmsHdTileDumper.cpp" />
     <ClCompile Include="SMS\HdPacks\HdPackConditionsSms.cpp" />
+    <ClCompile Include="SMS\HdPacks\SmsHdVideoFilter.cpp" />
+    <ClCompile Include="SMS\HdPacks\SmsHdPackLoader.cpp" />
     <ClCompile Include="SNES\AluMulDiv.cpp" />
     <ClCompile Include="SNES\Coprocessors\ST018\ArmV3Cpu.cpp" />
     <ClCompile Include="SNES\Coprocessors\ST018\St018.cpp" />
@@ -1147,7 +1150,7 @@
       <Optimization>Full</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;_LIB;SMS_HD_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>false</SDLCheck>
       <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
       <OmitFramePointers>true</OmitFramePointers>
@@ -1181,7 +1184,7 @@
       <Optimization>Full</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>MESENOPTIMIZE;WIN32;NDEBUG;_CONSOLE;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>MESENOPTIMIZE;WIN32;NDEBUG;_CONSOLE;_LIB;SMS_HD_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>false</SDLCheck>
       <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
       <OmitFramePointers>true</OmitFramePointers>
@@ -1213,7 +1216,7 @@
       <Optimization>Full</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>MESENOPTIMIZE;WIN32;NDEBUG;_CONSOLE;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>MESENOPTIMIZE;WIN32;NDEBUG;_CONSOLE;_LIB;SMS_HD_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>false</SDLCheck>
       <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
       <OmitFramePointers>true</OmitFramePointers>

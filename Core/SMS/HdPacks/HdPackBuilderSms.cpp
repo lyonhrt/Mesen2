@@ -11,6 +11,10 @@
 #include "Utilities/PNGHelper.h"
 #include "Utilities/HexUtilities.h"
 #include "Utilities/StringUtilities.h"
+#include "Utilities/xBRZ/xbrz.h"
+#include "Utilities/HQX/hqx.h"
+#include "Utilities/Scale2x/scalebit.h"
+#include "Utilities/KreedSaiEagle/SaiEagle.h"
 #include <map>
 #include <algorithm>
 #include <filesystem>
@@ -20,6 +24,7 @@
 #include <fstream>
 #include <unordered_set>
 #include <unordered_map>
+#include <iomanip>
 
 // Optional debug logging helpers (no-op unless SMS_HD_DEBUG is defined)
 #include "SMS/HdPacks/HdPackDebug.h"
@@ -36,9 +41,6 @@ HdPackBuilderSms::HdPackBuilderSms(Emulator* emu, SmsConsole* console, HdPackBui
     RomInfo romInfo = _emu->GetRomInfo();
     _romName = FolderUtilities::GetFilename(romInfo.RomFile.GetFileName(), false);
     
-    // If an existing hires.txt defines a <scale>, override _options.Scale before initializing data
-    TryOverrideScaleFromExistingManifest();
-    
     // Initialize HD pack data and palette
     InitializeHdPackData();
     UpdatePalette();
@@ -47,52 +49,234 @@ HdPackBuilderSms::HdPackBuilderSms(Emulator* emu, SmsConsole* console, HdPackBui
     LogInitializationInfo();
 }
 
-void HdPackBuilderSms::TryOverrideScaleFromExistingManifest()
+void HdPackBuilderSms::ProcessFrame(HdScreenInfoSms* frameInfo)
 {
-    try {
-        string manifestPath = FolderUtilities::CombinePath(_saveFolder, "hires.txt");
-        std::ifstream in(manifestPath);
-        if(!in.is_open()) {
-            return;
+    if(!_isRecording || !frameInfo) {
+        return;
+    }
+
+    // NES parity: System detection for proper palette/viewport handling
+    SmsModel model = _console->GetModel();
+    bool isGameGear = (model == SmsModel::GameGear);
+    bool isSg1000 = (model == SmsModel::Sg);
+    bool isColecoVision = (model == SmsModel::ColecoVision);
+    
+    // Note: Game Gear has 160x144 viewport, SG-1000 has different characteristics
+    // Future enhancement: Apply viewport/overscan adjustments per system
+    constexpr uint32_t ScreenWidth = 256;
+    constexpr uint32_t ScreenHeight = 240;
+    if(frameInfo->ScreenTiles.size() < ScreenWidth * ScreenHeight) {
+        MessageManager::Log("[SMS HD Pack] ProcessFrame: ScreenTiles size too small: " + 
+                           std::to_string(frameInfo->ScreenTiles.size()));
+        return;
+    }
+
+    std::unordered_map<uint32_t, bool> bgProcessed;
+    std::unordered_map<uint32_t, bool> spriteProcessed;
+    bgProcessed.reserve(1024);
+    spriteProcessed.reserve(512);
+    
+    // Debug: Count pixels with data
+    static int frameCount = 0;
+    frameCount++;
+    if(frameCount <= 3) {
+        int bgPixels = 0, spritePixels = 0;
+        for(uint32_t i = 0; i < ScreenWidth * ScreenHeight; i++) {
+            if(frameInfo->ScreenTiles[i].Background.TileIndex >= 0) bgPixels++;
+            if(frameInfo->ScreenTiles[i].SpriteCount > 0) spritePixels++;
         }
-        std::string line;
-        int parsedScale = -1;
-        while(std::getline(in, line)) {
-            // Trim leading spaces
-            size_t start = line.find_first_not_of(" \t");
-            if(start == std::string::npos) continue;
-            if(line.compare(start, 7, "<scale>") == 0) {
-                std::string rest = line.substr(start + 7);
-                // Stop at next '<' if present (supports <scale>4</scale>)
-                size_t lt = rest.find('<');
-                if(lt != std::string::npos) rest = rest.substr(0, lt);
-                // Trim whitespace
-                size_t s = rest.find_first_not_of(" \t");
-                if(s != std::string::npos) rest = rest.substr(s);
-                size_t e = rest.find_last_not_of(" \t\r\n");
-                if(e != std::string::npos) rest = rest.substr(0, e + 1);
-                try {
-                    int val = std::stoi(rest);
-                    if(val >= 1 && val <= 10) {
-                        parsedScale = val;
+        MessageManager::Log("[SMS HD Pack] Frame " + std::to_string(frameCount) + 
+                           ": bgPixels=" + std::to_string(bgPixels) + 
+                           ", spritePixels=" + std::to_string(spritePixels));
+    }
+
+    auto keyHash = [](const HdTileKeySms& key) -> uint32_t {
+        std::hash<HdTileKeySms> hasher;
+        return static_cast<uint32_t>(hasher(key));
+    };
+
+    for(uint32_t y = 0; y < ScreenHeight; y++) {
+        for(uint32_t x = 0; x < ScreenWidth; x++) {
+            HdSmsPixelInfo& pixel = frameInfo->ScreenTiles[y * ScreenWidth + x];
+
+            const HdSmsTileInfo& bgInfo = pixel.Background;
+            if(bgInfo.TileIndex >= 0) {
+                HdTileKeySms key = static_cast<const HdTileKeySms&>(bgInfo);
+                key.IsSprite = false;
+                key.IsVramTile = true;
+                uint32_t hash = keyHash(key);
+                
+                // NES parity: detect if sprites overlay this background tile
+                bool hasSpriteOver = (pixel.SpriteCount > 0);
+                
+                if(!bgProcessed[hash]) {
+                    bgProcessed[hash] = true;
+                    ProcessTileNesStyle(key, bgInfo.TileAddr, false, hasSpriteOver);
+                } else if(hasSpriteOver) {
+                    // Mark existing tile as needing transparency
+                    auto existingTile = _tilesByKey.find(key);
+                    if(existingTile != _tilesByKey.end()) {
+                        existingTile->second->TransparencyRequired = true;
                     }
-                } catch(...) {
-                    // ignore parse failure
                 }
-                break;
+            }
+
+            for(uint8_t i = 0; i < pixel.SpriteCount && i < 4; i++) {
+                const HdSmsTileInfo& sprInfo = pixel.Sprites[i];
+                if(sprInfo.TileIndex < 0) {
+                    continue;
+                }
+
+                HdTileKeySms key = static_cast<const HdTileKeySms&>(sprInfo);
+                key.IsSprite = true;
+                key.IsVramTile = true;
+                uint32_t hash = keyHash(key);
+                if(!spriteProcessed[hash]) {
+                    spriteProcessed[hash] = true;
+                    ProcessTileNesStyle(key, sprInfo.TileAddr, true);
+                }
             }
         }
-        in.close();
-        if(parsedScale > 0) {
-            if((int)_options.Scale != parsedScale) {
-                MessageManager::Log("[SMS HD Pack] Using scale from existing hires.txt: " + std::to_string(parsedScale));
-            }
-            _options.Scale = (uint32_t)parsedScale;
-            // If _hdData has already been set, mirror it (constructor calls before init, so this is just in case)
-            _hdData.Scale = _options.Scale;
+    }
+
+    _totalBgCount += (uint32_t)bgProcessed.size();
+    _totalSpriteCount += (uint32_t)spriteProcessed.size();
+    
+    // Debug: Log tile processing results
+    if(frameCount <= 3) {
+        MessageManager::Log("[SMS HD Pack] Frame " + std::to_string(frameCount) + 
+                           " processed: bgTiles=" + std::to_string(bgProcessed.size()) + 
+                           ", spriteTiles=" + std::to_string(spriteProcessed.size()) + 
+                           ", totalUniqueTiles=" + std::to_string(_hdData.Tiles.size()));
+    }
+}
+
+// Helper: Check if tile data is a solid color (all bytes identical)
+static bool IsBlankTile(const uint8_t* tileData) {
+    uint8_t firstByte = tileData[0];
+    for(int i = 1; i < SmsHdPackConstants::SMS_TILE_DATA_SIZE; i++) {
+        if(tileData[i] != firstByte) {
+            return false;
         }
-    } catch(...) {
-        // Ignore errors
+    }
+    return true;
+}
+
+// NES-style simplified pipeline: mirrors NES HdPackBuilder::ProcessTile
+// - Registers tiles based on key (pattern + palette), counts usage
+// - Creates HdPackTileInfoSms on first sight and generates HD tile immediately
+// - Avoids complex canonical hashing and co-occurrence logic
+void HdPackBuilderSms::ProcessTileNesStyle(HdTileKeySms& key, uint32_t tileAddr, bool isSprite, bool transparencyRequired)
+{
+    // NES parity: Blank tile grouping
+    if(_options.GroupBlankTiles && IsBlankTile(key.TileData)) {
+        _blankTileCount++;
+        
+        // All blank tiles share the same tile index/palette to reduce duplication
+        if(_blankTileIndex == 0) {
+            // First blank tile - store its index and palette as the canonical blank
+            _blankTileIndex = (uint32_t)tileAddr;
+            _blankTilePalette = key.PaletteColors;
+            
+            if(_options.DebugMode) {
+                MessageManager::Log("[SMS HD Pack] First blank tile detected at VRAM 0x" + 
+                                   HexUtilities::ToHex(tileAddr) + " - will reuse for all blank tiles");
+            }
+        } else {
+            // Reuse the first blank tile
+            key.TileIndex = (int32_t)_blankTileIndex;
+            key.PaletteColors = _blankTilePalette;
+            
+            if(_options.DebugMode && (_blankTileCount % 100 == 0)) {
+                MessageManager::Log("[SMS HD Pack] Blank tiles grouped: " + std::to_string(_blankTileCount));
+            }
+        }
+    }
+    
+    // Lookup existing tile by exact key (HdTileKeySms handles palette normalization internally)
+    auto existingIt = _tilesByKey.find(key);
+    if(existingIt == _tilesByKey.end()) {
+        // First time seeing this tile/palette combination, create and register
+        auto hdTile = std::make_unique<HdPackTileInfoSms>();
+        hdTile->PaletteColors = key.PaletteColors;
+        hdTile->TileIndex = (int32_t)tileAddr;
+        hdTile->DefaultTile = false;
+        hdTile->Brightness = 255;
+        hdTile->IsSprite = isSprite;
+        hdTile->PaletteIndex = key.PaletteIndex;
+        hdTile->VramBankId = GetVramBankId(tileAddr);
+        hdTile->TransparencyRequired = transparencyRequired;
+        hdTile->UsageCount = 1;
+
+        memcpy(hdTile->TileData, key.TileData, SmsHdPackConstants::SMS_TILE_DATA_SIZE);
+
+        // Ensure HD data uses current scale
+        if(_hdData.Scale == 0) { _hdData.Scale = _options.Scale; }
+
+        // Generate HD tile pixels now (uses VRAM read + palette)
+        GenerateHdTile(hdTile.get());
+
+        // Register in lookup maps
+        HdPackTileInfoSms* rawPtr = hdTile.get();
+        _tilesByKey[key] = rawPtr;
+        _tileUsageCount[key] = 1;
+
+        // Update unique counters
+        if(isSprite) {
+            _uniqueSpriteCount++;
+        } else {
+            _uniqueBgCount++;
+        }
+
+        // Add to the main tile collection (only once!)
+        _hdData.Tiles.push_back(std::move(hdTile));
+
+        if(_options.DebugMode && (_hdData.Tiles.size() % 50 == 0)) {
+            MessageManager::Log("[SMS HD Pack] Unique tiles: " + std::to_string(_hdData.Tiles.size()) +
+                               " (BG: " + std::to_string(_uniqueBgCount) + 
+                               ", Sprite: " + std::to_string(_uniqueSpriteCount) + ")");
+        }
+    } else {
+        // Tile already exists - just update usage count and flags
+        if(transparencyRequired && existingIt->second) {
+            existingIt->second->TransparencyRequired = true;
+        }
+        
+        auto usageIt = _tileUsageCount.find(key);
+        if(usageIt != _tileUsageCount.end() && usageIt->second < 0x7FFFFFFF) {
+            usageIt->second++;
+            if(existingIt->second) {
+                existingIt->second->UsageCount = usageIt->second;
+            }
+        }
+    }
+}
+
+void HdPackBuilderSms::DrawTileBorder(int gridX, int gridY, uint32_t* pngBuffer, int pngWidth, int tileSize, uint32_t color)
+{
+    if(!pngBuffer || pngWidth <= 0 || tileSize <= 0) {
+        return;
+    }
+
+    int x0 = gridX * tileSize;
+    int y0 = gridY * tileSize;
+    int x1 = x0 + tileSize - 1;
+    int y1 = y0 + tileSize - 1;
+    int pngHeight = 16 * tileSize; // Fixed 16x16 grid layout
+
+    auto putPixel = [&](int x, int y) {
+        if(x >= 0 && x < pngWidth && y >= 0 && y < pngHeight) {
+            pngBuffer[y * pngWidth + x] = color;
+        }
+    };
+
+    for(int x = x0; x <= x1; x++) {
+        putPixel(x, y0);
+        putPixel(x, y1);
+    }
+    for(int y = y0; y <= y1; y++) {
+        putPixel(x0, y);
+        putPixel(x1, y);
     }
 }
 
@@ -233,18 +417,12 @@ void HdPackBuilderSms::GenerateHdNesManifest(std::ofstream& manifestFile)
     for(char& c : sha1) { c = (char)toupper((unsigned char)c); }
     manifestFile << "<supportedRom>" << sha1 << std::endl;
 
-    // Build ordered list: Background sheets first, then Sprite sheets
-    std::vector<const SheetInfo*> ordered;
-    ordered.reserve(_sheetInfos.size());
-    for(const SheetInfo& si : _sheetInfos) { if(!si.IsSprite) ordered.push_back(&si); }
-    for(const SheetInfo& si : _sheetInfos) { if( si.IsSprite) ordered.push_back(&si); }
+    // Use _sheetInfos in the order they were saved (sprites first, then BG)
+    // This ensures imgIndex in manifest matches the order of <img> declarations
 
-    // Image list and index assignment based on the ordered vector
-    std::unordered_map<std::string, int> imgIndexByName;
-    imgIndexByName.reserve(ordered.size()*2);
-    for(size_t i = 0; i < ordered.size(); i++) {
-        manifestFile << "<img>" << ordered[i]->Filename << std::endl;
-        imgIndexByName[ordered[i]->Filename] = (int)i;
+    // Image list - write in the same order as _sheetInfos
+    for(size_t i = 0; i < _sheetInfos.size(); i++) {
+        manifestFile << "<img>" << _sheetInfos[i].Filename << std::endl;
     }
     manifestFile << std::endl;
 
@@ -253,22 +431,25 @@ void HdPackBuilderSms::GenerateHdNesManifest(std::ofstream& manifestFile)
         std::stringstream ss; ss << std::uppercase << std::hex << std::setw(width) << std::setfill('0') << value; return ss.str();
     };
 
-    for(size_t i = 0; i < ordered.size(); i++) {
-        const SheetInfo& si = *ordered[i];
-        int imgIndex = imgIndexByName[si.Filename];
+    for(size_t i = 0; i < _sheetInfos.size(); i++) {
+        const SheetInfo& si = _sheetInfos[i];
+        int imgIndex = (int)i;
         manifestFile << "#" << si.Filename << std::endl;
 
         for(const SheetTileRef& tr : si.Tiles) {
             const HdPackTileInfoSms* t = tr.Tile;
             if(!t) continue;
 
-            // Tile data: use VRAM tile index (tile address / 32) as hex (no prefix)
-            uint32_t vramTileIndex = (uint32_t)(t->TileIndex / SmsHdPackConstants::SMS_TILE_DATA_SIZE);
+            // Tile data: write 32-byte pattern as hex (HDNES CHR-RAM style)
+            // This ensures replacement is keyed by the actual tile pattern, not a transient index.
             std::stringstream tileDataHex;
-            tileDataHex << std::uppercase << std::hex << vramTileIndex;
+            tileDataHex << std::uppercase << std::hex;
+            for(int b = 0; b < (int)SmsHdPackConstants::SMS_TILE_DATA_SIZE; b++) {
+                tileDataHex << std::setw(2) << std::setfill('0') << (int)t->TileData[b];
+            }
 
-            // Palette data: 8-hex-digit uppercase representation of PaletteColors
-            std::string paletteHex = writeHex(t->PaletteColors, 8);
+            // Palette index: 0 for low palette, 1 for high palette (decimal)
+            int paletteIndex = t->PaletteIndex;
 
             // Coordinates are pixel positions in the PNG
             uint32_t x = tr.X;
@@ -278,7 +459,7 @@ void HdPackBuilderSms::GenerateHdNesManifest(std::ofstream& manifestFile)
             // Default tile flag based on t->DefaultTile
             char defFlag = t->DefaultTile ? 'Y' : 'N';
 
-            manifestFile << "<tile>" << imgIndex << "," << tileDataHex.str() << "," << paletteHex
+            manifestFile << "<tile>" << imgIndex << "," << tileDataHex.str() << "," << paletteIndex
                          << "," << x << "," << y << ",1," << defFlag << std::endl;
         }
 
@@ -419,11 +600,20 @@ void HdPackBuilderSms::StartRecording() {
     _isRecording = true;
     _hdPackSaved = false;
     
-    // Clear any existing tile data to start fresh
-    _hdData.Tiles.clear();
+    // Reset counters and tracking data
     _uniqueSpriteCount = 0;
     _uniqueBgCount = 0;
     _sheetInfos.clear();
+    _tileUsageCount.clear();
+    _tilesByKey.clear();
+    _tilesByCanonicalHash.clear();
+    _canonicalUsageCount.clear();
+    _hdData.Tiles.clear();
+    
+    // NES parity: Reset blank tile grouping
+    _blankTileIndex = 0;
+    _blankTilePalette = 0;
+    _blankTileCount = 0;
     
     // Ensure the save folder exists up-front so users can see it immediately
     FolderUtilities::CreateFolder(_saveFolder);
@@ -435,6 +625,15 @@ void HdPackBuilderSms::StartRecording() {
         } else {
             HDLOG_TAG("Folders", "Ensured save folder exists: " + _saveFolder);
         }
+    }
+    
+    // NES parity: Load existing pack to preserve edited tiles
+    // Existing tiles are loaded with their HD pixel data from PNGs
+    // New tiles will be added, existing tiles will be preserved
+    if(LoadExistingPack()) {
+        MessageManager::Log("[SMS HD Pack] Loaded existing pack - new tiles will be merged");
+    } else {
+        MessageManager::Log("[SMS HD Pack] No existing pack - starting fresh");
     }
     
     MessageManager::Log("[SMS HD Pack] Started recording tile data");
@@ -456,6 +655,12 @@ void HdPackBuilderSms::StopRecording() {
     MessageManager::Log("[SMS HD Pack] Total tiles captured: " + std::to_string(_hdData.Tiles.size()));
     MessageManager::Log("[SMS HD Pack] Background tiles: " + std::to_string(_uniqueBgCount));
     MessageManager::Log("[SMS HD Pack] Sprite tiles: " + std::to_string(_uniqueSpriteCount));
+    
+    // NES parity: Report blank tile grouping statistics
+    if(_options.GroupBlankTiles && _blankTileCount > 0) {
+        MessageManager::Log("[SMS HD Pack] Blank tiles grouped: " + std::to_string(_blankTileCount) + 
+                           " (saved " + std::to_string(_blankTileCount - 1) + " duplicate tiles)");
+    }
     
     // Save the HD pack data immediately when recording stops
     SaveHdPackNow();
@@ -495,6 +700,215 @@ void HdPackBuilderSms::InitializeHdPackData() {
     _uniqueBgCount = 0;
     _tileUsageCount.clear();
     _tilesByKey.clear();
+}
+
+// NES parity: Load existing tiles from hires.txt and PNGs to preserve edited tiles
+bool HdPackBuilderSms::LoadExistingPack() {
+    string manifestPath = FolderUtilities::CombinePath(_saveFolder, "hires.txt");
+    
+    std::error_code ec;
+    if(!std::filesystem::exists(std::filesystem::u8path(manifestPath), ec)) {
+        MessageManager::Log("[SMS HD Pack] No existing pack found at: " + manifestPath);
+        return false;
+    }
+    
+    MessageManager::Log("[SMS HD Pack] Loading existing pack from: " + manifestPath);
+    
+    // Parse manifest file
+    std::ifstream in(manifestPath);
+    if(!in.is_open()) {
+        MessageManager::Log("[SMS HD Pack] Failed to open manifest: " + manifestPath);
+        return false;
+    }
+    
+    std::vector<std::string> imgFiles;
+    std::vector<std::tuple<int, std::string, std::string, int, int, bool>> tileEntries; // imgIdx, tileHex, palHex, x, y, isSprite
+    uint32_t existingScale = 1;
+    bool sectionIsSprite = false;
+    
+    std::string line;
+    while(std::getline(in, line)) {
+        // Trim whitespace
+        size_t start = line.find_first_not_of(" \t\r\n");
+        size_t end = line.find_last_not_of(" \t\r\n");
+        if(start == std::string::npos) continue;
+        line = line.substr(start, end - start + 1);
+        
+        if(line.empty()) continue;
+        
+        if(line[0] == '#') {
+            // Section header
+            std::string name = line.substr(1);
+            sectionIsSprite = (name.find("SPRITES") != std::string::npos);
+            continue;
+        }
+        
+        if(line.rfind("<scale>", 0) == 0) {
+            std::string rest = line.substr(7);
+            size_t lt = rest.find('<');
+            if(lt != std::string::npos) rest = rest.substr(0, lt);
+            try { existingScale = std::stoi(rest); } catch(...) {}
+            continue;
+        }
+        
+        if(line.rfind("<img>", 0) == 0) {
+            std::string fn = line.substr(5);
+            size_t s = fn.find_first_not_of(" \t");
+            size_t e = fn.find_last_not_of(" \t\r\n");
+            if(s != std::string::npos) fn = fn.substr(s, e - s + 1);
+            imgFiles.push_back(fn);
+            continue;
+        }
+        
+        if(line.rfind("<tile>", 0) == 0) {
+            std::string content = line.substr(6);
+            size_t close = content.find("</tile>");
+            if(close != std::string::npos) content = content.substr(0, close);
+            
+            // Parse: imgIndex,tileDataHex,paletteHex,x,y,...
+            std::vector<std::string> parts;
+            std::stringstream ss(content);
+            std::string tok;
+            while(std::getline(ss, tok, ',')) {
+                size_t s = tok.find_first_not_of(" \t");
+                size_t e = tok.find_last_not_of(" \t");
+                if(s != std::string::npos) tok = tok.substr(s, e - s + 1);
+                parts.push_back(tok);
+            }
+            
+            if(parts.size() >= 5) {
+                try {
+                    int imgIdx = std::stoi(parts[0]);
+                    int x = std::stoi(parts[3]);
+                    int y = std::stoi(parts[4]);
+                    tileEntries.push_back({imgIdx, parts[1], parts[2], x, y, sectionIsSprite});
+                } catch(...) {}
+            }
+            continue;
+        }
+    }
+    in.close();
+    
+    // Check scale compatibility
+    if(existingScale != _options.Scale) {
+        MessageManager::Log("[SMS HD Pack] WARNING: Existing pack scale (" + std::to_string(existingScale) + 
+                           ") differs from requested scale (" + std::to_string(_options.Scale) + ")");
+        // Use existing scale to preserve tiles
+        _hdData.Scale = existingScale;
+    }
+    
+    // Load PNG images
+    std::vector<std::vector<uint32_t>> loadedImages;
+    std::vector<std::pair<uint32_t, uint32_t>> imageSizes; // width, height
+    
+    for(const std::string& imgFile : imgFiles) {
+        std::string fullPath = FolderUtilities::CombinePath(_saveFolder, imgFile);
+        std::vector<uint8_t> pngData;
+        uint32_t w = 0, h = 0;
+        
+        if(PNGHelper::ReadPNG(fullPath, pngData, w, h)) {
+            std::vector<uint32_t> pixels(w * h);
+            if(pngData.size() == w * h * 4) {
+                memcpy(pixels.data(), pngData.data(), pngData.size());
+            }
+            loadedImages.push_back(std::move(pixels));
+            imageSizes.push_back({w, h});
+            MessageManager::Log("[SMS HD Pack] Loaded image: " + imgFile + " (" + std::to_string(w) + "x" + std::to_string(h) + ")");
+        } else {
+            loadedImages.push_back({});
+            imageSizes.push_back({0, 0});
+            MessageManager::Log("[SMS HD Pack] Failed to load image: " + imgFile);
+        }
+    }
+    
+    // Create tile entries with preserved HD pixel data
+    uint32_t tileSize = 8 * _hdData.Scale;
+    int loadedCount = 0;
+    
+    for(const auto& entry : tileEntries) {
+        int imgIdx = std::get<0>(entry);
+        const std::string& tileHex = std::get<1>(entry);
+        const std::string& palHex = std::get<2>(entry);
+        int x = std::get<3>(entry);
+        int y = std::get<4>(entry);
+        bool isSprite = std::get<5>(entry);
+        
+        if(imgIdx < 0 || imgIdx >= (int)loadedImages.size()) continue;
+        if(loadedImages[imgIdx].empty()) continue;
+        
+        // Parse tile data from hex
+        uint8_t tileData[32] = {};
+        for(size_t i = 0; i + 1 < tileHex.size() && i/2 < 32; i += 2) {
+            auto hexVal = [](char c) -> int {
+                if(c >= '0' && c <= '9') return c - '0';
+                if(c >= 'a' && c <= 'f') return 10 + (c - 'a');
+                if(c >= 'A' && c <= 'F') return 10 + (c - 'A');
+                return 0;
+            };
+            tileData[i/2] = (hexVal(tileHex[i]) << 4) | hexVal(tileHex[i+1]);
+        }
+        
+        // Parse palette from hex
+        uint32_t paletteColors = 0;
+        if(palHex.size() >= 8) {
+            try { paletteColors = std::stoul(palHex, nullptr, 16); } catch(...) {}
+        }
+        
+        // Create tile info
+        auto hdTile = std::make_unique<HdPackTileInfoSms>();
+        memcpy(hdTile->TileData, tileData, 32);
+        hdTile->PaletteColors = paletteColors;
+        hdTile->IsSprite = isSprite;
+        hdTile->PaletteIndex = isSprite ? 1 : 0;
+        hdTile->X = x;
+        hdTile->Y = y;
+        hdTile->IsVramTile = true;
+        
+        // Extract HD pixel data from loaded PNG
+        uint32_t imgW = imageSizes[imgIdx].first;
+        uint32_t imgH = imageSizes[imgIdx].second;
+        const std::vector<uint32_t>& imgPixels = loadedImages[imgIdx];
+        
+        hdTile->HdTileData.resize(tileSize * tileSize);
+        for(uint32_t dy = 0; dy < tileSize && (y + dy) < imgH; dy++) {
+            for(uint32_t dx = 0; dx < tileSize && (x + dx) < imgW; dx++) {
+                uint32_t srcIdx = (y + dy) * imgW + (x + dx);
+                if(srcIdx < imgPixels.size()) {
+                    hdTile->HdTileData[dy * tileSize + dx] = imgPixels[srcIdx];
+                }
+            }
+        }
+        
+        // Create key and add to tracking maps
+        HdTileKeySms key;
+        memcpy(key.TileData, tileData, 32);
+        key.PaletteColors = paletteColors;
+        key.IsSprite = isSprite;
+        key.IsVramTile = true;
+        
+        HdPackTileInfoSms* rawPtr = hdTile.get();
+        _hdData.Tiles.push_back(std::move(hdTile));
+        _tilesByKey[key] = rawPtr;
+        
+        // Mark with high usage count to preserve order (NES parity)
+        _tileUsageCount[key] = 0xFFFFFFFF - loadedCount;
+        rawPtr->UsageCount = _tileUsageCount[key];
+        
+        loadedCount++;
+    }
+    
+    MessageManager::Log("[SMS HD Pack] Loaded " + std::to_string(loadedCount) + " existing tiles from pack");
+    
+    // Count sprites vs backgrounds from loaded tiles
+    for(const auto& tile : _hdData.Tiles) {
+        if(tile->IsSprite) {
+            _uniqueSpriteCount++;
+        } else {
+            _uniqueBgCount++;
+        }
+    }
+    
+    return loadedCount > 0;
 }
 
 void HdPackBuilderSms::LogInitializationInfo() {
@@ -668,12 +1082,22 @@ void HdPackBuilderSms::LogPaletteInfo() {
             MessageManager::Log(ss.str());
         }
     } else {
-        MessageManager::Log("[SMS HD Pack] Background Palette is identical to Sprite Palette");
     }
 }
 
 void HdPackBuilderSms::ProcessTile(uint32_t cycle, uint32_t scanline, uint32_t tileAddr, HdTileKeySms& tile, 
-                                    bool isSprite, uint32_t bankHash, bool hasBgSprite) {
+                                    bool isSprite, uint32_t bankHash, bool hasBgSprite)
+{
+    // Debug: Log every sprite tile processed
+    if(_options.DebugMode && isSprite) {
+        static uint32_t s_spriteProcessCount = 0;
+        s_spriteProcessCount++;
+        if(s_spriteProcessCount <= 10) {
+            MessageManager::Log("[SMS HD Pack] SPRITE TILE PROCESSED #" + std::to_string(s_spriteProcessCount) + 
+                              " at cycle=" + std::to_string(cycle) + " scanline=" + std::to_string(scanline));
+        }
+    }
+    
     // Skip if not recording - this ensures tiles are only captured during recording sessions
     if (!_isRecording) {
         return;
@@ -681,6 +1105,12 @@ void HdPackBuilderSms::ProcessTile(uint32_t cycle, uint32_t scanline, uint32_t t
     
     // Skip if VDP is not available
     if(!_vdp) {
+        return;
+    }
+
+    // Optional: simplified NES-style pipeline for stability and easier debugging
+    if(_options.UseNesStylePipeline) {
+        ProcessTileNesStyle(tile, tileAddr, isSprite);
         return;
     }
     
@@ -711,6 +1141,28 @@ void HdPackBuilderSms::ProcessTile(uint32_t cycle, uint32_t scanline, uint32_t t
     _tileUsageCount[tile]++;
     uint64_t canonicalHash = GetCanonicalHash(tile);
     _canonicalUsageCount[canonicalHash]++;
+
+    if(_options.DebugMode && isSprite) {
+        static std::unordered_map<uint64_t, uint32_t> s_spriteHashLogCount;
+        uint32_t& logCount = s_spriteHashLogCount[canonicalHash];
+        if(logCount < 3) {
+            std::stringstream ss;
+            ss << "[SMS HD Pack] Sprite canonical hash: 0x" << std::hex << canonicalHash
+               << " pal=" << std::dec << (int)tile.PaletteIndex
+               << " usage=" << _canonicalUsageCount[canonicalHash];
+
+            std::string dataHex;
+            dataHex.reserve(SmsHdPackConstants::SMS_TILE_DATA_SIZE * 2);
+            for(int i = 0; i < (int)SmsHdPackConstants::SMS_TILE_DATA_SIZE; i++) {
+                char buf[3];
+                sprintf_s(buf, sizeof(buf), "%02X", tile.TileData[i]);
+                dataHex.append(buf);
+            }
+            ss << " data=" << dataHex;
+            MessageManager::Log(ss.str());
+        }
+        logCount++;
+    }
     
     // Prefer canonical deduplication to guarantee no repeats
     HdPackTileInfoSms* canonicalTile = nullptr;
@@ -725,6 +1177,43 @@ void HdPackBuilderSms::ProcessTile(uint32_t cycle, uint32_t scanline, uint32_t t
             if(isSprite) {
                 NoteSpriteOccurrence(canonicalTile, cycle, scanline);
             }
+        }
+        if(_options.DebugMode && isSprite) {
+            static std::unordered_map<uint64_t, uint32_t> s_spriteDupLogCount;
+            uint32_t& dupCount = s_spriteDupLogCount[canonicalHash];
+            if(dupCount < 3) {
+                std::stringstream ss;
+                ss << "[SMS HD Pack] Sprite canonical duplicate hit: 0x" << std::hex << canonicalHash
+                   << " usage=" << std::dec << _canonicalUsageCount[canonicalHash];
+                MessageManager::Log(ss.str());
+            }
+            if(canonicalTile && memcmp(canonicalTile->TileData, tile.TileData, SmsHdPackConstants::SMS_TILE_DATA_SIZE) != 0) {
+                static std::unordered_map<uint64_t, uint32_t> s_spriteCollisionLogCount;
+                uint32_t& collisionCount = s_spriteCollisionLogCount[canonicalHash];
+                if(collisionCount < 3) {
+                    std::string existingHex;
+                    existingHex.reserve(SmsHdPackConstants::SMS_TILE_DATA_SIZE * 2);
+                    std::string incomingHex;
+                    incomingHex.reserve(SmsHdPackConstants::SMS_TILE_DATA_SIZE * 2);
+                    for(int i = 0; i < (int)SmsHdPackConstants::SMS_TILE_DATA_SIZE; i++) {
+                        char buf[3];
+                        sprintf_s(buf, sizeof(buf), "%02X", canonicalTile->TileData[i]);
+                        existingHex.append(buf);
+                    }
+                    for(int i = 0; i < (int)SmsHdPackConstants::SMS_TILE_DATA_SIZE; i++) {
+                        char buf[3];
+                        sprintf_s(buf, sizeof(buf), "%02X", tile.TileData[i]);
+                        incomingHex.append(buf);
+                    }
+
+                    std::stringstream ss;
+                    ss << "[SMS HD Pack] SPRITE HASH COLLISION detected: hash=0x" << std::hex << canonicalHash
+                       << " existing=" << existingHex << " new=" << incomingHex;
+                    MessageManager::Log(ss.str());
+                }
+                collisionCount++;
+            }
+            dupCount++;
         }
         if(_options.DebugMode) {
             MessageManager::Log("[SMS HD Pack] DEBUG: Canonical duplicate tile encountered, updated usage count: " + std::to_string(_canonicalUsageCount[canonicalHash]));
@@ -766,9 +1255,17 @@ void HdPackBuilderSms::ProcessTile(uint32_t cycle, uint32_t scanline, uint32_t t
         if(isSprite) {
             // SMS sprites always use high palette (palette index 1)
             hdTile->PaletteIndex = 1;
+            if(_options.DebugMode) {
+                MessageManager::Log("[SMS HD Pack] SPRITE tile at addr=0x" + HexUtilities::ToHex(tileAddr, true) + 
+                                   ", PaletteIndex=1");
+            }
         } else {
             // Background tiles: extract palette index from upper bits of PaletteColors
             hdTile->PaletteIndex = (tile.PaletteColors >> 16) & 0xFF;
+            if(_options.DebugMode) {
+                MessageManager::Log("[SMS HD Pack] BACKGROUND tile at addr=0x" + HexUtilities::ToHex(tileAddr, true) + 
+                                   ", PaletteIndex=" + std::to_string(hdTile->PaletteIndex));
+            }
         }
         
         // Log tile information if debug mode is enabled
@@ -896,18 +1393,22 @@ uint32_t HdPackBuilderSms::GetVramBankId(uint32_t tileAddr) {
 }
 
 uint32_t HdPackBuilderSms::ExtractPixelFromBitplanes(uint8_t plane0, uint8_t plane1, uint8_t plane2, uint8_t plane3, int pixelX) {
-    // SMS tiles are stored with the leftmost pixel in the most significant bit (bit 7)
+    // SMS tiles use a 2-bitplane format, not 4-bitplane
+    // Each row has 4 bytes, but they represent 2 bitplanes with 2 bytes each
+    // Based on VDP analysis: SMS uses 4-bit color (16 colors) with 2 bitplanes
     
     // Calculate the bit mask for this pixel (7-pixelX to flip the order)
     uint8_t bitMask = 1 << (7 - pixelX);
     
-    // Extract the bit from each bitplane using the mask
+    // SMS format: only use first 2 planes for 4-bit color (16 colors)
+    // plane0 and plane1 are the actual bitplanes
+    // plane2 and plane3 might be unused or used differently
     uint8_t bit0 = (plane0 & bitMask) ? 1 : 0;
     uint8_t bit1 = (plane1 & bitMask) ? 1 : 0;
     uint8_t bit2 = (plane2 & bitMask) ? 1 : 0;
     uint8_t bit3 = (plane3 & bitMask) ? 1 : 0;
     
-    // Combine the bits to form the color index
+    // Combine all 4 bits to form the color index (SMS supports 16 colors)
     uint8_t colorIndex = (bit3 << 3) | (bit2 << 2) | (bit1 << 1) | bit0;
     
     return colorIndex;
@@ -967,6 +1468,14 @@ void HdPackBuilderSms::GenerateHdTile(HdPackTileInfoSms* tile) {
         return;
     }
     
+    // NES parity: Skip regeneration if tile already has HD data (preserves edited tiles)
+    if(!tile->HdTileData.empty()) {
+        if(_options.DebugMode) {
+            MessageManager::Log("[SMS HD Pack] Skipping HD generation - tile already has HD data (preserved from existing pack)");
+        }
+        return;
+    }
+    
     if(_options.DebugMode) {
         MessageManager::Log("[SMS HD Pack] Generating HD tile at address 0x" + 
                            HexUtilities::ToHex(tile->TileIndex) + 
@@ -976,21 +1485,136 @@ void HdPackBuilderSms::GenerateHdTile(HdPackTileInfoSms* tile) {
     
     // Initialize HD tile data buffer
     int scale = _hdData.Scale;
-    int width = SmsHdPackConstants::SMS_TILE_SIZE * scale;
-    int height = SmsHdPackConstants::SMS_TILE_SIZE * scale;
+    int hdScale = (scale < 1) ? 1 : scale;
+    int width = SmsHdPackConstants::SMS_TILE_SIZE * hdScale;
+    int height = SmsHdPackConstants::SMS_TILE_SIZE * hdScale;
     
+    // Use the already-captured tile data from the key (captured during VDP rendering)
+    // DO NOT read from current VRAM - it may have changed since the tile was captured
+    uint8_t tileData[SmsHdPackConstants::SMS_TILE_DATA_SIZE] = {0};
+    memcpy(tileData, tile->TileData, SmsHdPackConstants::SMS_TILE_DATA_SIZE);
+    
+    // Update palette to ensure we have the current VDP state
+    UpdatePalette();
+    
+    // Detect SG-1000 mode (TMS9918) vs SMS Mode 4
+    SmsVdpState state = _vdp->GetState();
+    bool isSg1000Mode = !state.UseMode4;
+    
+    // Step 1: Generate the original 8x8 tile with colors
+    std::vector<uint32_t> originalTile(8 * 8, 0);
+    
+    if(isSg1000Mode) {
+        // SG-1000 / TMS9918 mode: 1 bit per pixel, 8 bytes per tile
+        // TileData[0-7] = pattern data (1 byte per row)
+        // PaletteColors contains the color byte (FG in high nibble, BG in low nibble)
+        uint8_t colorByte = (uint8_t)(tile->PaletteColors & 0xFF);
+        uint8_t fgColor = (colorByte >> 4) & 0x0F;
+        uint8_t bgColor = colorByte & 0x0F;
+        
+        // Get SG-1000 palette colors
+        const uint16_t* sgPalette = _vdp->GetSmsSgPalette();
+        uint32_t fgRgb = 0xFF000000;  // Default black
+        uint32_t bgRgb = 0xFF000000;
+        
+        if(sgPalette) {
+            // Convert 15-bit RGB to 32-bit ARGB
+            uint16_t fgPal = sgPalette[fgColor];
+            uint16_t bgPal = sgPalette[bgColor];
+            
+            uint8_t fgR = ((fgPal >> 0) & 0x1F) << 3;
+            uint8_t fgG = ((fgPal >> 5) & 0x1F) << 3;
+            uint8_t fgB = ((fgPal >> 10) & 0x1F) << 3;
+            fgRgb = 0xFF000000 | (fgR << 16) | (fgG << 8) | fgB;
+            
+            uint8_t bgR = ((bgPal >> 0) & 0x1F) << 3;
+            uint8_t bgG = ((bgPal >> 5) & 0x1F) << 3;
+            uint8_t bgB = ((bgPal >> 10) & 0x1F) << 3;
+            bgRgb = 0xFF000000 | (bgR << 16) | (bgG << 8) | bgB;
+        }
+        
+        for(int y = 0; y < 8; y++) {
+            uint8_t patternByte = tileData[y];  // 1 byte per row
+            for(int x = 0; x < 8; x++) {
+                // Bit 7 is leftmost pixel, bit 0 is rightmost
+                bool pixelSet = (patternByte >> (7 - x)) & 0x01;
+                originalTile[y * 8 + x] = pixelSet ? fgRgb : bgRgb;
+            }
+        }
+    } else {
+        // SMS Mode 4: 4 bits per pixel, 32 bytes per tile (4 bitplanes)
+        for(int y = 0; y < 8; y++) {
+            for(int x = 0; x < 8; x++) {
+                int rowOffset = y * 4;
+                uint8_t plane0 = tileData[rowOffset + 0];
+                uint8_t plane1 = tileData[rowOffset + 1];
+                uint8_t plane2 = tileData[rowOffset + 2];
+                uint8_t plane3 = tileData[rowOffset + 3];
+                uint8_t colorIndex = ExtractPixelFromBitplanes(plane0, plane1, plane2, plane3, x);
+                originalTile[y * 8 + x] = GetPixelColor(colorIndex, tile);
+            }
+        }
+    }
+    
+    // Step 2: Apply filter to scale up
     tile->HdTileData.clear();
     tile->HdTileData.resize(width * height, 0);
     
-    // Read tile data from VRAM
-    uint8_t tileData[SmsHdPackConstants::SMS_TILE_DATA_SIZE] = {0};
-    if(!ReadTileDataFromVram(tile, tileData)) {
-        MessageManager::Log("[SMS HD Pack] ERROR: Failed to read tile data from VRAM");
-        return;
+    switch(_options.FilterType) {
+        case ScaleFilterType::HQX:
+            if(hdScale >= 2 && hdScale <= 4) {
+                hqx(hdScale, originalTile.data(), tile->HdTileData.data(), 8, 8);
+            } else {
+                // Fallback to prescale for unsupported scales
+                ApplyPrescale(originalTile, tile->HdTileData, hdScale);
+            }
+            break;
+            
+        case ScaleFilterType::xBRZ:
+            if(hdScale >= 2 && hdScale <= 6) {
+                xbrz::scale(hdScale, originalTile.data(), tile->HdTileData.data(), 8, 8, xbrz::ColorFormat::ARGB);
+            } else {
+                ApplyPrescale(originalTile, tile->HdTileData, hdScale);
+            }
+            break;
+            
+        case ScaleFilterType::Scale2x:
+            if(hdScale >= 2 && hdScale <= 4) {
+                ::scale(hdScale, tile->HdTileData.data(), 8 * sizeof(uint32_t) * hdScale, originalTile.data(), 8 * sizeof(uint32_t), 4, 8, 8);
+            } else {
+                ApplyPrescale(originalTile, tile->HdTileData, hdScale);
+            }
+            break;
+            
+        case ScaleFilterType::_2xSai:
+            if(hdScale == 2) {
+                twoxsai_generic_xrgb8888(8, 8, originalTile.data(), 8, tile->HdTileData.data(), 8 * hdScale);
+            } else {
+                ApplyPrescale(originalTile, tile->HdTileData, hdScale);
+            }
+            break;
+            
+        case ScaleFilterType::Super2xSai:
+            if(hdScale == 2) {
+                supertwoxsai_generic_xrgb8888(8, 8, originalTile.data(), 8, tile->HdTileData.data(), 8 * hdScale);
+            } else {
+                ApplyPrescale(originalTile, tile->HdTileData, hdScale);
+            }
+            break;
+            
+        case ScaleFilterType::SuperEagle:
+            if(hdScale == 2) {
+                supereagle_generic_xrgb8888(8, 8, originalTile.data(), 8, tile->HdTileData.data(), 8 * hdScale);
+            } else {
+                ApplyPrescale(originalTile, tile->HdTileData, hdScale);
+            }
+            break;
+            
+        case ScaleFilterType::Prescale:
+        default:
+            ApplyPrescale(originalTile, tile->HdTileData, hdScale);
+            break;
     }
-    
-    // Process all pixels in the tile
-    ProcessTilePixels(tile, tileData);
     
     // Apply debug effects if enabled
     ApplyDebugEffects(tile);
@@ -1002,6 +1626,9 @@ void HdPackBuilderSms::GenerateHdTile(HdPackTileInfoSms* tile) {
             VerifyPaletteUsage(tile, paletteRam);
         }
     }
+    
+    // NES parity: Analyze tile for transparency and blank detection
+    tile->UpdateFlags();
     
     if(_options.DebugMode) {
         MessageManager::Log("[SMS HD Pack] Tile generation completed for tile at address 0x" + 
@@ -1986,6 +2613,18 @@ void HdPackBuilderSms::SaveHdPack()
     MessageManager::Log("[SMS HD Pack] Separated tiles: " + std::to_string(bgTiles.size()) + 
                        " background tiles, " + std::to_string(spriteTiles.size()) + " sprite tiles");
 
+    // DEBUG: Check why sprites might be missing
+    if(spriteTiles.empty()) {
+        MessageManager::Log("[SMS HD Pack] WARNING: No sprite tiles found in _hdData.Tiles! Checking capture process...");
+        MessageManager::Log("[SMS HD Pack] Total tiles captured: " + std::to_string(_hdData.Tiles.size()));
+        // Scan _hdData to see if any marked as sprite exist
+        int actualSprites = 0;
+        for(const auto& t : _hdData.Tiles) {
+            if(t->IsSprite) actualSprites++;
+        }
+        MessageManager::Log("[SMS HD Pack] Actual IsSprite=true count in _hdData: " + std::to_string(actualSprites));
+    }
+
     // Optional: sort tiles by usage frequency (player sprites should surface first)
     if(_options.SortByUsageFrequency) {
         auto byStable = [this](HdPackTileInfoSms* a, HdPackTileInfoSms* b) {
@@ -2107,7 +2746,7 @@ void HdPackBuilderSms::DrawTile(HdPackTileInfoSms* tile, int tileNumber, uint32_
     
     // Verify we have enough data
     int expectedSize = tileSize * tileSize;
-    if(tile->HdTileData.size() < expectedSize) {
+    if((int)tile->HdTileData.size() < expectedSize) {
         if(_options.DebugMode) {
             MessageManager::Log("[SMS HD Pack] DrawTile: Insufficient tile data - expected " + 
                                std::to_string(expectedSize) + ", got " + std::to_string(tile->HdTileData.size()));
@@ -2121,10 +2760,41 @@ void HdPackBuilderSms::DrawTile(HdPackTileInfoSms* tile, int tileNumber, uint32_
             int srcIndex = y * tileSize + x;
             int dstIndex = (tileY + y) * pngWidth + (tileX + x);
             
-            if(srcIndex < tile->HdTileData.size() && 
+            if(srcIndex < (int)tile->HdTileData.size() && 
                dstIndex >= 0 && 
                dstIndex < pngWidth * pngWidth) {
                 pngBuffer[dstIndex] = tile->HdTileData[srcIndex];
+            }
+        }
+    }
+    
+    // Optional: Draw 1px border around the tile (magenta color for visibility)
+    // This helps visualize tile boundaries even at higher scales like 4x
+    if(_options.DrawTileBorders) {
+        constexpr uint32_t borderColor = 0xFFFF00FF; // Magenta (ARGB)
+        int pngHeight = pngWidth; // Assuming square PNG
+        
+        // Top and bottom borders
+        for(int x = 0; x < tileSize; x++) {
+            int topIdx = tileY * pngWidth + (tileX + x);
+            int botIdx = (tileY + tileSize - 1) * pngWidth + (tileX + x);
+            if(topIdx >= 0 && topIdx < pngWidth * pngHeight) {
+                pngBuffer[topIdx] = borderColor;
+            }
+            if(botIdx >= 0 && botIdx < pngWidth * pngHeight) {
+                pngBuffer[botIdx] = borderColor;
+            }
+        }
+        
+        // Left and right borders
+        for(int y = 0; y < tileSize; y++) {
+            int leftIdx = (tileY + y) * pngWidth + tileX;
+            int rightIdx = (tileY + y) * pngWidth + (tileX + tileSize - 1);
+            if(leftIdx >= 0 && leftIdx < pngWidth * pngHeight) {
+                pngBuffer[leftIdx] = borderColor;
+            }
+            if(rightIdx >= 0 && rightIdx < pngWidth * pngHeight) {
+                pngBuffer[rightIdx] = borderColor;
             }
         }
     }
@@ -2157,9 +2827,10 @@ vector<HdPackTileInfoSms*> HdPackBuilderSms::FilterValidTiles(const vector<HdPac
         
         // Ensure tile has HD data
         if(tile->HdTileData.empty()) {
-            GenerateHdTile(tile);
+            // Do NOT regenerate at save time - VRAM has likely changed since the frame was captured,
+            // which would result in corrupt/incorrect graphics.
+            continue;
         }
-        if(tile->HdTileData.empty()) continue;
         
         // Filter out empty/black tiles
         bool isEmpty = true;
@@ -2176,23 +2847,45 @@ vector<HdPackTileInfoSms*> HdPackBuilderSms::FilterValidTiles(const vector<HdPac
         }
         
         // Skip empty tiles
-        if(isEmpty || nonTransparentPixels < 3) {
-            continue;
-        }
-        
-        // Simple duplicate detection using visual hash
-        uint64_t visualHash = 0;
-        if(tile->HdTileData.size() >= 64) {
-            for(size_t j = 0; j < tile->HdTileData.size(); j++) {
-                uint32_t pixel = tile->HdTileData[j] & 0xFFFFFF;
-                visualHash = visualHash * 31 + pixel;
+        // For sprites, we must be more permissive:
+        // 1. Allow opaque black pixels (sprites often use black for outlines/shadows)
+        // 2. Allow small tiles (particles/bullets might be < 3 pixels)
+        if(isSprite) {
+            if(nonTransparentPixels < 1) {
+                continue;
+            }
+        } else {
+            // Background tiles: stricter filtering to avoid dumping empty/black space
+            if(isEmpty || nonTransparentPixels < 3) {
+                continue;
             }
         }
         
+        // Compute visual hash including alpha for proper deduplication
+        // Use FNV-1a hash for better distribution
+        uint64_t visualHash = 14695981039346656037ULL; // FNV offset basis
+        for(size_t j = 0; j < tile->HdTileData.size(); j++) {
+            uint32_t pixel = tile->HdTileData[j];
+            visualHash ^= (pixel & 0xFF);
+            visualHash *= 1099511628211ULL; // FNV prime
+            visualHash ^= ((pixel >> 8) & 0xFF);
+            visualHash *= 1099511628211ULL;
+            visualHash ^= ((pixel >> 16) & 0xFF);
+            visualHash *= 1099511628211ULL;
+            visualHash ^= ((pixel >> 24) & 0xFF);
+            visualHash *= 1099511628211ULL;
+        }
+        
+        // Also include sprite flag in hash to keep BG and sprite tiles separate
+        visualHash ^= (isSprite ? 0xDEADBEEF : 0xCAFEBABE);
+        visualHash *= 1099511628211ULL;
+        
         // Check for duplicates
-        if(visualHash != 0 && tileHashes.find(visualHash) == tileHashes.end()) {
+        if(tileHashes.find(visualHash) == tileHashes.end()) {
             validTiles.push_back(tile);
             tileHashes.insert(visualHash);
+        } else if(_options.DebugMode) {
+            MessageManager::Log("[SMS HD Pack] Skipping duplicate tile (visual hash collision)");
         }
     }
     
@@ -2226,15 +2919,19 @@ void HdPackBuilderSms::DrawTileToBuffer(HdPackTileInfoSms* tile, int gridX, int 
     
     int tileX = gridX * tileSize;
     int tileY = gridY * tileSize;
+    // The sheet layout is a fixed 16x16 grid; compute the true buffer height in pixels
+    int pngHeight = 16 * tileSize;
     
     // Copy tile data to buffer with bounds checking
-    for(int y = 0; y < tileSize && y < 8 * _hdData.Scale; y++) {
-        for(int x = 0; x < tileSize && x < 8 * _hdData.Scale; x++) {
+    // tileSize is already 8 * scale, so we don't need the additional scale check
+    for(int y = 0; y < tileSize; y++) {
+        for(int x = 0; x < tileSize; x++) {
             int srcIndex = y * tileSize + x;
             int dstIndex = (tileY + y) * pngWidth + (tileX + x);
             
-            if(srcIndex < tile->HdTileData.size() && dstIndex >= 0 && 
-               dstIndex < pngWidth * (pngWidth / tileSize * 16) * tileSize) { // 16x16 grid bounds
+            // Ensure writes stay within the PNG buffer: [0, pngWidth*pngHeight)
+            if(srcIndex < (int)tile->HdTileData.size() && dstIndex >= 0 && 
+               dstIndex < pngWidth * pngHeight) {
                 pngBuffer[dstIndex] = tile->HdTileData[srcIndex];
             }
         }
@@ -2310,6 +3007,13 @@ void HdPackBuilderSms::CreateTileSheets(const vector<HdPackTileInfoSms*>& tiles,
             int gridY = i / gridWidth;
             
             DrawTileToBuffer(tile, gridX, gridY, pngBuffer.data(), pngWidth, tileSize);
+
+            // Optional tile border overlay for debugging/visual alignment
+            if(_options.DrawTileBorders) {
+                // Cyan for BG, Magenta for sprites
+                uint32_t borderColor = isSprite ? 0xFFFF00FFu : 0xFF00FFFFu;
+                DrawTileBorder(gridX, gridY, pngBuffer.data(), pngWidth, tileSize, borderColor);
+            }
 
             // Record mapping for manifest (pixel coordinates)
             SheetTileRef tr { tile, (uint16_t)(gridX * tileSize), (uint16_t)(gridY * tileSize) };
@@ -2441,8 +3145,8 @@ uint64_t HdPackBuilderSms::GetCanonicalHash(const HdTileKeySms& key) const
         }
     }
 
-    // Normalize palette selection: BG => 0/1, Sprite => 1
-    uint8_t pal = key.IsSprite ? 1 : HdTileKeySms::NormalizePaletteIndex(key.PaletteColors);
+    // Use palette index directly from key
+    uint8_t pal = key.PaletteIndex;
     h ^= (uint64_t)pal;
     h *= FNV_PRIME;
 
@@ -2466,14 +3170,42 @@ uint64_t HdPackBuilderSms::GetCanonicalHash(const HdPackTileInfoSms* tile) const
         h *= FNV_PRIME;
     }
 
-    // Palette selection normalized
-    uint8_t pal = tile->IsSprite ? 1 : HdTileKeySms::NormalizePaletteIndex(tile->PaletteColors);
+    // Use palette index directly from tile
+    uint8_t pal = tile->PaletteIndex;
     h ^= (uint64_t)pal;
     h *= FNV_PRIME;
 
     // Sprite/background flag
     h ^= (uint64_t)(tile->IsSprite ? 1 : 0);
     h *= FNV_PRIME;
+
+    // Debug logging for sprite hash collisions
+    if(_options.DebugMode && tile->IsSprite) {
+        static std::map<uint64_t, std::string> spriteHashes;
+        std::string tileDataHex;
+        for(int i = 0; i < 32; i++) { // Full 32 bytes
+            char buf[4];
+            sprintf_s(buf, sizeof(buf), "%02X", tile->TileData[i]);
+            tileDataHex += buf;
+        }
+        
+        auto it = spriteHashes.find(h);
+        if(it != spriteHashes.end()) {
+            if(it->second != tileDataHex) {
+                std::stringstream ss;
+                ss << "[SMS HD Pack] HASH COLLISION DETECTED! Hash=0x" << std::hex << h
+                   << " Existing=" << it->second << " New=" << tileDataHex 
+                   << " Pal=" << std::dec << (int)pal;
+                MessageManager::Log(ss.str());
+            }
+        } else {
+            spriteHashes[h] = tileDataHex;
+            std::stringstream ss;
+            ss << "[SMS HD Pack] Recording sprite hash: 0x" << std::hex << h 
+               << " Data=" << tileDataHex << " Pal=" << std::dec << (int)pal;
+            MessageManager::Log(ss.str());
+        }
+    }
 
     return h;
 }
@@ -2486,12 +3218,37 @@ bool HdPackBuilderSms::ReadTileDataFromVram(HdPackTileInfoSms* tile, uint8_t* ti
         return false;
     }
     
-    // Calculate the actual VRAM address for this tile
-    uint16_t tileAddr = tile->TileIndex * SmsHdPackConstants::SMS_TILE_DATA_SIZE;
+    // TileIndex already contains the VRAM address, don't multiply again
+    uint16_t tileAddr = tile->TileIndex;
+    
+    // DEBUG: Log tile address and first few bytes
+    if(_options.DebugMode) {
+        MessageManager::Log("[SMS HD Pack] Reading tile from VRAM address 0x" + HexUtilities::ToHex(tileAddr));
+    }
     
     // Read the tile data from VRAM
     for(int i = 0; i < SmsHdPackConstants::SMS_TILE_DATA_SIZE; i++) {
         tileData[i] = _vdp->DebugReadVram(tileAddr + i);
+    }
+    
+    // DEBUG: Log complete tile data to check for corruption patterns
+    if(_options.DebugMode) {
+        string hexData = "";
+        for(int i = 0; i < SmsHdPackConstants::SMS_TILE_DATA_SIZE; i++) {
+            if(i > 0 && i % 4 == 0) hexData += " | ";
+            hexData += HexUtilities::ToHex(tileData[i], 2) + " ";
+        }
+        MessageManager::Log("[SMS HD Pack] Complete tile data: " + hexData);
+        
+        // Also decode the first row to see the pixel pattern
+        if(SmsHdPackConstants::SMS_TILE_DATA_SIZE >= 4) {
+            string pixelRow = "Row 0 pixels: ";
+            for(int x = 0; x < 8; x++) {
+                uint8_t colorIndex = ExtractPixelFromBitplanes(tileData[0], tileData[1], tileData[2], tileData[3], x);
+                pixelRow += std::to_string(colorIndex) + " ";
+            }
+            MessageManager::Log("[SMS HD Pack] " + pixelRow);
+        }
     }
     
     // Store the tile data in the tile object
@@ -2533,13 +3290,14 @@ uint32_t HdPackBuilderSms::GetPixelColor(uint8_t colorIndex, HdPackTileInfoSms* 
         }
         
         // Calculate palette index for Game Gear
+        // PaletteIndex: 0 = low palette (0-15), 1 = high palette (16-31)
         uint8_t paletteIndex;
         if(tile->IsSprite) {
-            // Sprites use palette entries 16-31
+            // Sprites always use high palette (16-31)
             paletteIndex = 16 + (colorIndex % 16);
         } else {
-            // Background uses palette entries 0-15
-            paletteIndex = colorIndex % 16;
+            // Background uses low or high palette based on PaletteIndex
+            paletteIndex = (tile->PaletteIndex ? 16 : 0) + (colorIndex % 16);
         }
         
         // Get the Game Gear color (already converted to RGB555 format by VDP)
@@ -2567,18 +3325,27 @@ uint32_t HdPackBuilderSms::GetPixelColor(uint8_t colorIndex, HdPackTileInfoSms* 
             return 0xFFFF00FF; // Magenta (error indicator)
         }
         
-        // Calculate palette index based on sprite/background type
+        // Calculate palette index based on sprite/background type and PaletteIndex
+        // PaletteIndex: 0 = low palette (0-15), 1 = high palette (16-31)
         uint8_t paletteIndex;
         if(tile->IsSprite) {
-            // For sprites, use the sprite palette (second half of palette RAM)
+            // Sprites always use high palette (16-31)
             paletteIndex = 16 + (colorIndex % 16);
         } else {
-            // For background tiles, use the background palette (first half of palette RAM)
-            paletteIndex = colorIndex % 16;
+            // Background uses low or high palette based on PaletteIndex
+            paletteIndex = (tile->PaletteIndex ? 16 : 0) + (colorIndex % 16);
         }
         
         // Get the raw SMS color value directly from palette RAM
         uint8_t smsColor = paletteRam[paletteIndex];
+        
+        // Debug logging for color conversion
+        if(_options.DebugMode) {
+            MessageManager::Log("[SMS HD Pack] Palette lookup: colorIndex=" + std::to_string(colorIndex) + 
+                               ", isSprite=" + std::to_string(tile->IsSprite) + 
+                               ", paletteIndex=" + std::to_string(paletteIndex) + 
+                               ", smsColor=0x" + HexUtilities::ToHex(smsColor, true));
+        }
         
         // Convert the SMS color to ARGB format
         uint32_t color = ConvertSmsColor(smsColor);
@@ -2593,20 +3360,24 @@ void HdPackBuilderSms::ProcessTilePixels(HdPackTileInfoSms* tile, const uint8_t*
     int scale = _hdData.Scale;
     int width = SmsHdPackConstants::SMS_TILE_SIZE * scale;
     
+    // SMS tiles use INTERLEAVED format:
+    // 32 bytes = 8 rows × 4 bytes per row (one byte per bitplane)
+    // Row 0: bytes 0-3 (bitplanes 0,1,2,3)
+    // Row 1: bytes 4-7 (bitplanes 0,1,2,3)
+    // ...
+    // Row 7: bytes 28-31 (bitplanes 0,1,2,3)
+    
     // Process each pixel in the original 8x8 tile
     for(int y = 0; y < SmsHdPackConstants::SMS_TILE_SIZE; y++) {
-        // Each row starts at y*4 in the tile data (4 bitplanes per row)
-        int rowOffset = y * SmsHdPackConstants::SMS_BITPLANES;
-        
-        // Get the 4 bytes for this row (one byte per bitplane)
-        uint8_t plane0 = tileData[rowOffset + 0];
-        uint8_t plane1 = tileData[rowOffset + 1];
-        uint8_t plane2 = tileData[rowOffset + 2];
-        uint8_t plane3 = tileData[rowOffset + 3];
-        
-        // Process each pixel in the current row
         for(int x = 0; x < SmsHdPackConstants::SMS_TILE_SIZE; x++) {
-            // Extract pixel color index from bitplanes
+            // SMS INTERLEAVED format: each row has 4 consecutive bytes for 4 bitplanes
+            int rowOffset = y * 4;
+            uint8_t plane0 = tileData[rowOffset + 0];  // Bitplane 0 for row y
+            uint8_t plane1 = tileData[rowOffset + 1];  // Bitplane 1 for row y
+            uint8_t plane2 = tileData[rowOffset + 2];  // Bitplane 2 for row y
+            uint8_t plane3 = tileData[rowOffset + 3];  // Bitplane 3 for row y
+            
+            // Extract pixel color index from bitplanes using SMS format
             uint8_t colorIndex = ExtractPixelFromBitplanes(plane0, plane1, plane2, plane3, x);
             
             // Get the color from the palette
@@ -2621,8 +3392,29 @@ void HdPackBuilderSms::ProcessTilePixels(HdPackTileInfoSms* tile, const uint8_t*
                     int hdIndex = destY * width + destX;
                     
                     // Ensure we're within bounds
-                    if(hdIndex >= 0 && hdIndex < tile->HdTileData.size()) {
+                    if(hdIndex >= 0 && hdIndex < (int)tile->HdTileData.size()) {
                         tile->HdTileData[hdIndex] = color;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Helper function to apply prescale (simple pixel duplication)
+void HdPackBuilderSms::ApplyPrescale(const std::vector<uint32_t>& src, std::vector<uint32_t>& dst, int scale) {
+    if(scale < 1) scale = 1;
+    int srcWidth = 8;
+    int dstWidth = 8 * scale;
+    
+    for(int y = 0; y < 8; y++) {
+        for(int x = 0; x < 8; x++) {
+            uint32_t color = src[y * srcWidth + x];
+            for(int sy = 0; sy < scale; sy++) {
+                for(int sx = 0; sx < scale; sx++) {
+                    int dstIdx = (y * scale + sy) * dstWidth + (x * scale + sx);
+                    if(dstIdx < (int)dst.size()) {
+                        dst[dstIdx] = color;
                     }
                 }
             }
@@ -2816,8 +3608,19 @@ void HdPackBuilderSms::FinalizeTransparencyAndLogging() {
     }
 }
 
+// Helper to convert tile data to hex string
+static std::string TileDataToHex(const uint8_t* data, size_t len) {
+    std::stringstream ss;
+    for(size_t i = 0; i < len; i++) {
+        ss << std::hex << std::setw(2) << std::setfill('0') << (int)data[i];
+    }
+    return ss.str();
+}
+
 // Generate HD pack tile entries for hires.txt manifest
 // Creates proper tile mapping entries that the HD pack replacement system can use
+// Format: <tile>tileData,paletteIndex,isSprite,x,y,filename</tile>
+// Where tileData is 64-char hex string (32 bytes)
 void HdPackBuilderSms::GenerateHdPackTileEntries(std::ofstream& manifestFile) {
     if(!manifestFile.is_open()) {
         MessageManager::Log("[SMS HD Pack] Error: Manifest file is not open");
@@ -2825,13 +3628,14 @@ void HdPackBuilderSms::GenerateHdPackTileEntries(std::ofstream& manifestFile) {
     }
     
     // Write comment explaining the tile format
-    manifestFile << "#Tile mapping format:" << std::endl;
-    manifestFile << "#<tile>tileIndex,paletteIndex,x,y,filename</tile>" << std::endl;
+    manifestFile << "#Tile mapping format (SMS VRAM tiles use pattern data for matching):" << std::endl;
+    manifestFile << "#<tile>tileData,paletteIndex,isSprite,x,y,filename</tile>" << std::endl;
     manifestFile << "#Where:" << std::endl;
-    manifestFile << "#  tileIndex = SMS tile index in VRAM" << std::endl;
-    manifestFile << "#  paletteIndex = palette index (0-15 bg, 16-31 sprite)" << std::endl;
-    manifestFile << "#  x,y = position in tile sheet" << std::endl;
-    manifestFile << "#  filename = PNG file containing the tile" << std::endl;
+    manifestFile << "#  tileData = 64-char hex string (32 bytes of SMS tile pattern data)" << std::endl;
+    manifestFile << "#  paletteIndex = 0 for low palette, 1 for high palette" << std::endl;
+    manifestFile << "#  isSprite = 0 for background, 1 for sprite" << std::endl;
+    manifestFile << "#  x,y = position in tile sheet (in pixels)" << std::endl;
+    manifestFile << "#  filename = PNG file containing the HD tile" << std::endl;
     manifestFile << std::endl;
     
     // Group tiles by type for organized output
@@ -2866,9 +3670,10 @@ void HdPackBuilderSms::GenerateHdPackTileEntries(std::ofstream& manifestFile) {
                 filename << "background_tiles_" << (sheetIndex + 1) << ".png";
             }
             
-            // Write tile entry
-            manifestFile << "<tile>" << tile->TileIndex << "," << (int)tile->PaletteIndex 
-                        << "," << x << "," << y << "," << filename.str() << "</tile>" << std::endl;
+            // Write tile entry with tile data hex
+            std::string tileDataHex = TileDataToHex(tile->TileData, 32);
+            manifestFile << "<tile>" << tileDataHex << "," << (int)tile->PaletteIndex 
+                        << ",0," << x << "," << y << "," << filename.str() << "</tile>" << std::endl;
             
             tileCount++;
         }
@@ -2896,9 +3701,10 @@ void HdPackBuilderSms::GenerateHdPackTileEntries(std::ofstream& manifestFile) {
                 filename << "sprite_tiles_" << (sheetIndex + 1) << ".png";
             }
             
-            // Write tile entry
-            manifestFile << "<tile>" << tile->TileIndex << "," << (int)tile->PaletteIndex 
-                        << "," << x << "," << y << "," << filename.str() << "</tile>" << std::endl;
+            // Write tile entry with tile data hex
+            std::string tileDataHex = TileDataToHex(tile->TileData, 32);
+            manifestFile << "<tile>" << tileDataHex << "," << (int)tile->PaletteIndex 
+                        << ",1," << x << "," << y << "," << filename.str() << "</tile>" << std::endl;
             
             tileCount++;
         }
