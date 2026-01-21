@@ -329,61 +329,19 @@ namespace SmsHdPackApi {
     bool TryGetReplacementByHash(const uint8_t* tileData32, bool isSprite, uint8_t palGroup,
                                  int& imgIndex, uint16_t& srcX, uint16_t& srcY, uint32_t& scale)
     {
-        if(!IsHdReplacementEnabled()) return false;
-        if(!tileData32) return false;
+        if(!IsHdReplacementEnabled() || !tileData32) return false;
+        
         uint64_t h = ComputeCanonicalHash(tileData32, isSprite, palGroup);
-        
-        // Debug: Log sprite hash lookups to see if they're all the same
-        if(isSprite) {
-            static std::map<uint64_t, int> spriteHashCounts;
-            spriteHashCounts[h]++;
-            if(spriteHashCounts[h] <= 3) { // Log first few occurrences
-                std::stringstream ss;
-                ss << "[SMS HD Pack] Sprite lookup hash: 0x" << std::hex << h 
-                   << " count=" << std::dec << spriteHashCounts[h] << " pal=" << (int)palGroup;
-                MessageManager::Log(ss.str());
-            }
-        }
-        
         auto it = g_hdHashMap.find(h);
         if(it == g_hdHashMap.end()) {
-#ifdef SMS_HD_DEBUG
-            static int s_hashMissLogs = 0;
-            if(s_hashMissLogs < 50) {
-                s_hashMissLogs++;
-                // Primary miss log
-                HDLOG_TAG("HashMiss", std::string("key=0x") + Hex64_16(h) +
-                    " spr=" + (isSprite?"1":"0") +
-                    " pal=" + std::to_string(palGroup) +
-                    " data=" + BytesToHex(tileData32, 32, 16)
-                );
-                // Diagnose likely mismatch causes by probing alt variants
-                uint8_t altPal = palGroup ^ 1;
-                uint64_t hPal = ComputeCanonicalHash(tileData32, isSprite, altPal);
-                if(g_hdHashMap.find(hPal) != g_hdHashMap.end()) {
-                    const HdEntry& eAlt = g_hdHashMap[hPal];
-                    HDLOG_TAG("HintPal", std::string("altPal hit key=0x") + Hex64_16(hPal) +
-                        " -> img=" + std::to_string(eAlt.ImgIndex) +
-                        " x=" + std::to_string(eAlt.X) +
-                        " y=" + std::to_string(eAlt.Y)
-                    );
-                }
-                bool altSpr = !isSprite;
-                uint64_t hSpr = ComputeCanonicalHash(tileData32, altSpr, palGroup);
-                if(g_hdHashMap.find(hSpr) != g_hdHashMap.end()) {
-                    const HdEntry& eAlt2 = g_hdHashMap[hSpr];
-                    HDLOG_TAG("HintSpr", std::string("altSpr hit key=0x") + Hex64_16(hSpr) +
-                        " -> img=" + std::to_string(eAlt2.ImgIndex) +
-                        " x=" + std::to_string(eAlt2.X) +
-                        " y=" + std::to_string(eAlt2.Y)
-                    );
-                }
-            }
-#endif
             return false;
         }
+        
         const HdEntry& e = it->second;
-        imgIndex = e.ImgIndex; srcX = e.X; srcY = e.Y; scale = g_hdPackScale;
+        imgIndex = e.ImgIndex;
+        srcX = e.X;
+        srcY = e.Y;
+        scale = g_hdPackScale;
         return true;
     }
 
