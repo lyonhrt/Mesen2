@@ -1,5 +1,3 @@
-#pragma once
-#define SMS_HD_DEBUG 1
 #include "pch.h"
 #include "SMS/HdPacks/SmsHdPackApi.h"
 #include "SMS/HdPacks/HdPackBuilderSms.h"

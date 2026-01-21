@@ -9,11 +9,15 @@
 #include "Utilities/HexUtilities.h"
 #include <fstream>
 
-static void LogToFile(const std::string& msg) {
-    static std::ofstream logFile("C:\\Users\\Surface Pro\\Documents\\hd_debug_log.txt", std::ios::app);
+static void LogToFile([[maybe_unused]] const std::string& msg) {
+    // Debug logging disabled for release builds
+    // To enable: uncomment below and use a platform-appropriate path
+    /*
+    static std::ofstream logFile("hd_debug_log.txt", std::ios::app);
     if(logFile.is_open()) {
         logFile << msg << std::endl;
     }
+    */
 }
 
 HdBuilderSmsVdp::HdBuilderSmsVdp()
