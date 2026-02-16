@@ -531,7 +531,7 @@ void HdPackBuilderSms::ValidateHdNesManifestFile(const string& manifestPath)
             if(parts[1].empty()) { badTile++; continue; }
             // paletteIndex: decimal integer (0 or 1 for SMS, 0-255 for SG-1000)
             // No strict validation needed - just ensure it's parseable
-            try { std::stoi(parts[2]); } catch(...) { badTile++; continue; }
+            try { (void)std::stoi(parts[2]); } catch(...) { badTile++; continue; }
             // x,y
             int x=-1,y=-1; try { x = std::stoi(parts[3]); y = std::stoi(parts[4]); } catch(...) { badTile++; continue; }
             if(x < 0 || y < 0 || x >= sheetWidth || y >= sheetHeight) { badTile++; continue; }
@@ -1639,11 +1639,9 @@ bool HdPackBuilderSms::ValidateTileData(const HdPackTileInfoSms* tile) const {
         return false;
     }
     
-    // Validate tile data size
-    if(sizeof(tile->TileData) != SmsHdPackConstants::SMS_TILE_DATA_SIZE) {
-        MessageManager::Log("[SMS HD Pack] ERROR: Invalid tile data size");
-        return false;
-    }
+    // Validate tile data size (compile-time check, always true for correctly defined structs)
+    static_assert(sizeof(HdPackTileInfoSms::TileData) == SmsHdPackConstants::SMS_TILE_DATA_SIZE, "TileData size mismatch");
+    (void)tile; // Suppress unused warning after static_assert
     
     // Additional validation can be added here
     return true;
@@ -2024,8 +2022,7 @@ void HdPackBuilderSms::DumpVramContents(const string& filename) {
     constexpr int height = 256;
     std::unique_ptr<uint32_t[]> imgData = std::make_unique<uint32_t[]>(width * height);
     
-    // Get VRAM data from memory manager
-    SmsMemoryManager* memoryManager = _console->GetMemoryManager();
+    // Get VRAM data from VDP
     uint8_t vramBuffer[0x4000] = {};
     // Read VRAM data using VDP ReadVram method
     for(uint16_t i = 0; i < 0x4000; i++) {
@@ -2143,10 +2140,10 @@ void HdPackBuilderSms::DumpPaletteVisualizer(const string& filename) {
         int digitX = colorIndex * colorWidth + 4;
         int digitY = 4;
         int digit1 = colorIndex / 10;
-        int digit2 = colorIndex % 10;
+        (void)digit1; // Suppress unused warning - digit rendering is simplified
         
         // Only draw first digit if not zero
-        if(digit1 > 0) {
+        if(colorIndex >= 10) {
             // Draw a simple digit representation
             for(int i = 0; i < 3; i++) {
                 for(int j = 0; j < 5; j++) {
@@ -2183,11 +2180,10 @@ void HdPackBuilderSms::DumpPaletteVisualizer(const string& filename) {
         // Simple digit rendering (very basic)
         int digitX = colorIndex * colorWidth + 4;
         int digitY = colorHeight + 4;
-        int digit1 = colorIndex / 10;
-        int digit2 = colorIndex % 10;
+        (void)colorIndex; // Suppress unused warning - digit rendering is simplified
         
         // Only draw first digit if not zero
-        if(digit1 > 0) {
+        if(colorIndex >= 10) {
             // Draw a simple digit representation
             for(int i = 0; i < 3; i++) {
                 for(int j = 0; j < 5; j++) {
@@ -2204,10 +2200,6 @@ void HdPackBuilderSms::DumpPaletteVisualizer(const string& filename) {
             }
         }
     }
-    
-    // Draw labels
-    const int labelY1 = colorHeight - 10;
-    const int labelY2 = height - 10;
     
     // Draw dividing line
     for(int x = 0; x < width; x++) {
@@ -2236,10 +2228,8 @@ void HdPackBuilderSms::TraceSprites() {
     debugFile << "SMS Sprite Debug Information" << std::endl;
     debugFile << "================================" << std::endl << std::endl;
     
-    // Get VRAM data from memory manager
-    SmsMemoryManager* memoryManager = _console->GetMemoryManager();
+    // Get VRAM data from VDP
     uint8_t vramBuffer[0x4000] = {};
-    // Read VRAM data using VDP ReadVram method
     for(uint16_t i = 0; i < 0x4000; i++) {
         vramBuffer[i] = _vdp->DebugReadVram(i);
     }
@@ -2360,7 +2350,7 @@ void HdPackBuilderSms::TraceSprites() {
         uint8_t attributes = vramBuffer[satBase + 3];
         
         // Extract attribute information
-        uint8_t paletteOffset = (attributes & 0x10) ? 16 : 0;
+        (void)attributes; // paletteOffset not used in simplified rendering
         bool vFlip = (attributes & 0x04) != 0;
         bool hFlip = (attributes & 0x02) != 0;
         
@@ -2533,11 +2523,10 @@ void HdPackBuilderSms::GenerateDebugOverlay(HdPackTileInfoSms* tile, bool isSpri
         int offsetY = height - 6;
         
         // Draw palette index number (simple digit rendering)
-        int digit1 = paletteIndex / 10;
-        int digit2 = paletteIndex % 10;
+        (void)paletteIndex; // Suppress unused warning - digit rendering is simplified
         
         // Only draw first digit if not zero
-        if(digit1 > 0) {
+        if(paletteIndex >= 10) {
             // Draw a simple digit representation
             for(uint32_t i = 0; i < 3 && (offsetX + i < width); i++) {
                 for(uint32_t j = 0; j < 5 && (offsetY + j < height); j++) {
@@ -3317,7 +3306,7 @@ void HdPackBuilderSms::CreateTileSheets(const vector<HdPackTileInfoSms*>& tiles,
     const int TILES_PER_SHEET = 16 * 16;
     const int gridWidth = 16;
     const int gridHeight = 16;
-    int totalSheets = (tiles.size() + TILES_PER_SHEET - 1) / TILES_PER_SHEET;
+    int totalSheets = static_cast<int>((tiles.size() + TILES_PER_SHEET - 1) / TILES_PER_SHEET);
     
     for(int sheetIndex = 0; sheetIndex < totalSheets; sheetIndex++) {
         int startTile = sheetIndex * TILES_PER_SHEET;
@@ -3579,19 +3568,17 @@ bool HdPackBuilderSms::ReadTileDataFromVram(HdPackTileInfoSms* tile, uint8_t* ti
         string hexData = "";
         for(int i = 0; i < SmsHdPackConstants::SMS_TILE_DATA_SIZE; i++) {
             if(i > 0 && i % 4 == 0) hexData += " | ";
-            hexData += HexUtilities::ToHex(tileData[i], 2) + " ";
+            hexData += HexUtilities::ToHex(tileData[i]) + " ";
         }
         MessageManager::Log("[SMS HD Pack] Complete tile data: " + hexData);
         
         // Also decode the first row to see the pixel pattern
-        if(SmsHdPackConstants::SMS_TILE_DATA_SIZE >= 4) {
-            string pixelRow = "Row 0 pixels: ";
-            for(int x = 0; x < 8; x++) {
-                uint8_t colorIndex = ExtractPixelFromBitplanes(tileData[0], tileData[1], tileData[2], tileData[3], x);
-                pixelRow += std::to_string(colorIndex) + " ";
-            }
-            MessageManager::Log("[SMS HD Pack] " + pixelRow);
+        string pixelRow = "Row 0 pixels: ";
+        for(int x = 0; x < 8; x++) {
+            uint8_t colorIndex = ExtractPixelFromBitplanes(tileData[0], tileData[1], tileData[2], tileData[3], x);
+            pixelRow += std::to_string(colorIndex) + " ";
         }
+        MessageManager::Log("[SMS HD Pack] " + pixelRow);
     }
     
     // Store the tile data in the tile object
