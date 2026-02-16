@@ -107,11 +107,14 @@ HdScreenInfoSms* HdBuilderSmsVdp::SwapBuffersOnFrameEnd()
         return nullptr;
     }
 
-    // VRAM scan disabled: it was causing black sprites (tiles captured before palette init),
-    // excessive tile count (all 512 slots scanned every frame), and checkerboard artifacts.
-    // Pixel-by-pixel capture handles all visible tiles correctly.
-    // TODO: Revisit with a more targeted approach for title/intro tiles if needed.
-    // ScanVramTiles();
+    // VRAM scan: capture all tiles in VRAM to ensure tiles that aren't currently
+    // visible on screen are still captured (e.g., tiles loaded for upcoming frames).
+    // SMS/GG uses ScanVramTiles(), SG-1000 uses ScanVramTilesSg().
+    if(_state.UseMode4) {
+        ScanVramTiles();
+    } else {
+        ScanVramTilesSg();
+    }
 
     // Count pixels with data in the buffer we're about to swap out (the one that was being written to)
     static int swapCount = 0;
@@ -546,57 +549,64 @@ void HdBuilderSmsVdp::LoadSpriteTilesSg()
         _loadingSpriteCount = 0;
     }
     
-    // SG-1000 sprites are captured at cycles 10, 22, 44, 56 (after tile data is loaded)
-    // Each sprite takes 12 cycles, and we capture 4 sprites
-    int sprIndex = -1;
-    if(cycle == 10) sprIndex = 0;
-    else if(cycle == 22) sprIndex = 1;
-    else if(cycle == 44) sprIndex = 2;
-    else if(cycle == 56) sprIndex = 3;
-    
-    if(sprIndex < 0 || sprIndex >= 4) {
+    // SG-1000 sprites are fully loaded at cycles 10, 22, 44, 56
+    // At these cycles, _spriteIndex has already been incremented by the parent,
+    // so the sprite we just loaded is at _spriteIndex - 1
+    // For large sprites, two sprites are loaded per cycle (at _spriteIndex - 2 and _spriteIndex - 1)
+    bool isCaptureCycle = (cycle == 10 || cycle == 22 || cycle == 44 || cycle == 56);
+    if(!isCaptureCycle) {
         return;
     }
     
-    // Capture sprite tile data
-    HdSmsTileInfo& spriteTile = _loadingSpriteTiles[sprIndex];
-    spriteTile.Reset();
-    spriteTile.IsSprite = true;
-    spriteTile.IsVramTile = true;
-    spriteTile.PaletteIndex = 1; // Sprites use "high" palette conceptually
-    spriteTile.IsSg1000Mode = true; // Mark as SG-1000 sprite
+    // Capture the sprite(s) that were just loaded
+    // _spriteIndex points to the NEXT sprite slot, so we capture _spriteIndex - 1
+    // For large sprites, we also need to capture _spriteIndex - 2
+    int spritesToCapture = _state.UseLargeSprites ? 2 : 1;
+    int startIdx = _spriteIndex - spritesToCapture;
     
-    // Calculate base pattern address (without row offset) for proper hash matching
-    // TileAddr includes row offset, but we need the base address for all 8 rows
-    uint16_t patternBase = _state.SpritePatternSelector & 0x3800;
-    uint16_t tileIndex = _spriteShifters[sprIndex].RawTileIndex;
-    uint16_t tileBaseAddr = patternBase | (tileIndex << 3);
-    
-    // SG-1000 sprites are 8 bytes (or 32 bytes for 16x16)
-    // Read the full 8-byte pattern (all rows)
-    for(int i = 0; i < 8; i++) {
-        spriteTile.TileData[i] = _videoRam[(tileBaseAddr + i) & 0x3FFF];
-    }
-    // Zero remaining bytes
-    for(int i = 8; i < 32; i++) {
-        spriteTile.TileData[i] = 0;
-    }
-    
-    // Sprite color is stored in TileData[1] by the parent (attribute byte)
-    // The color is in the low 4 bits
-    uint8_t spriteColor = _spriteShifters[sprIndex].TileData[1] & 0x0F;
-    spriteTile.PaletteColors = spriteColor;
-    spriteTile.TileAddr = tileBaseAddr;
-    spriteTile.TileIndex = (int32_t)tileIndex;
-    
-    // Capture SG-1000 sprite palette (single color)
-    CaptureSgSpritePalette(spriteTile.CapturedPalette, spriteColor);
-    
-    // Capture sprite X position for double-buffering
-    _loadingSpriteX[sprIndex] = (int16_t)_spriteShifters[sprIndex].SpriteX;
-    
-    if(sprIndex >= (int)_loadingSpriteCount) {
-        _loadingSpriteCount = sprIndex + 1;
+    for(int i = 0; i < spritesToCapture; i++) {
+        int sprIdx = startIdx + i;
+        if(sprIdx < 0 || sprIdx >= 8) continue;
+        
+        // Capture sprite tile data
+        HdSmsTileInfo& spriteTile = _loadingSpriteTiles[sprIdx];
+        spriteTile.Reset();
+        spriteTile.IsSprite = true;
+        spriteTile.IsVramTile = true;
+        spriteTile.PaletteIndex = 1; // Sprites use "high" palette conceptually
+        spriteTile.IsSg1000Mode = true; // Mark as SG-1000 sprite
+        
+        // Calculate base pattern address (without row offset) for proper hash matching
+        uint16_t patternBase = _state.SpritePatternSelector & 0x3800;
+        uint16_t tileIndex = _spriteShifters[sprIdx].RawTileIndex;
+        uint16_t tileBaseAddr = patternBase | (tileIndex << 3);
+        
+        // SG-1000 sprites are 8 bytes
+        // Read the full 8-byte pattern (all rows)
+        for(int j = 0; j < 8; j++) {
+            spriteTile.TileData[j] = _videoRam[(tileBaseAddr + j) & 0x3FFF];
+        }
+        // Zero remaining bytes
+        for(int j = 8; j < 32; j++) {
+            spriteTile.TileData[j] = 0;
+        }
+        
+        // Sprite color is stored in TileData[1] by the parent (attribute byte)
+        // The color is in the low 4 bits
+        uint8_t spriteColor = _spriteShifters[sprIdx].TileData[1] & 0x0F;
+        spriteTile.PaletteColors = spriteColor;
+        spriteTile.TileAddr = tileBaseAddr;
+        spriteTile.TileIndex = (int32_t)tileIndex;
+        
+        // Capture SG-1000 sprite palette (single color)
+        CaptureSgSpritePalette(spriteTile.CapturedPalette, spriteColor);
+        
+        // Capture sprite X position for double-buffering
+        _loadingSpriteX[sprIdx] = (int16_t)_spriteShifters[sprIdx].SpriteX;
+        
+        if(sprIdx >= (int)_loadingSpriteCount) {
+            _loadingSpriteCount = sprIdx + 1;
+        }
     }
 }
 
@@ -722,5 +732,105 @@ void HdBuilderSmsVdp::ScanVramTiles()
         if(!spriteTileIndices.count(tileIndex) && ntPaletteMap.find(tileIndex) == ntPaletteMap.end()) {
             pushTile(tileIndex, 0, false);
         }
+    }
+}
+
+void HdBuilderSmsVdp::ScanVramTilesSg()
+{
+    if(!_hdCaptureEnabled || !_captureBuffer || _state.UseMode4) {
+        return; // Only for SG-1000/TMS9918 modes (not Mode 4)
+    }
+    
+    // Skip text mode for now
+    if(_state.M1_Use224LineMode) {
+        return;
+    }
+    
+    // SG-1000 has 256 tile patterns (8 bytes each = 2KB pattern table)
+    // In Mode 2 (Graphic 2), there can be up to 768 patterns (3 banks of 256)
+    int maxTiles = _state.M2_AllowHeightChange ? 768 : 256;
+    
+    // Helper to capture a single SG-1000 tile
+    auto captureTile = [&](uint16_t tileIndex, bool isSprite) {
+        HdSmsTileInfo tile;
+        tile.Reset();
+        tile.TileIndex = (int32_t)tileIndex;
+        tile.IsSprite = isSprite;
+        tile.IsVramTile = true;
+        tile.IsSg1000Mode = true;
+        tile.PaletteIndex = isSprite ? 1 : 0;
+        
+        // Calculate pattern address
+        uint16_t patternAddr;
+        if(isSprite) {
+            patternAddr = (_state.SpritePatternSelector & 0x3800) | (tileIndex << 3);
+        } else if(_state.M3_Use240LineMode) {
+            patternAddr = (_state.BgPatternTableAddress & 0x3800) + (tileIndex * 8);
+        } else if(_state.M2_AllowHeightChange) {
+            uint16_t mask = ((_state.BgPatternTableAddress >> 3) | 0xFF) & 0x3FF;
+            patternAddr = (_state.BgPatternTableAddress & 0x2000) | ((tileIndex & mask) * 8);
+        } else {
+            patternAddr = (_state.BgPatternTableAddress & 0x3800) + (tileIndex * 8);
+        }
+        
+        // Read 8-byte pattern
+        for(int i = 0; i < 8; i++) {
+            tile.TileData[i] = _videoRam[(patternAddr + i) & 0x3FFF];
+        }
+        for(int i = 8; i < 32; i++) {
+            tile.TileData[i] = 0;
+        }
+        
+        // Read color data and compute hash
+        tile.CapturedPalette.Reset();
+        tile.CapturedPalette.EntryCount = 8;
+        tile.CapturedPalette.BytesPerEntry = 1;
+        tile.CapturedPalette.Format = SmsHdPackSharedConstants::PaletteFormat::Sg1000;
+        
+        uint32_t colorHash = 0;
+        if(isSprite) {
+            // Sprites use a single color from sprite attributes
+            // We can't know the color without sprite table, so use 0
+            uint8_t spriteColor = 0x0F; // White as default
+            for(int i = 0; i < 8; i++) {
+                tile.CapturedPalette.Data[i] = spriteColor;
+            }
+            colorHash = spriteColor;
+        } else {
+            for(int row = 0; row < 8; row++) {
+                uint8_t colorByte = 0;
+                if(_state.M3_Use240LineMode) {
+                    colorByte = _videoRam[(patternAddr + row) & 0x3FFF];
+                } else if(_state.M2_AllowHeightChange) {
+                    uint16_t colorMask = ((_state.ColorTableAddress >> 3) | 0x07) & 0x3FF;
+                    uint16_t colorAddr = (_state.ColorTableAddress & 0x2000) | ((tileIndex & colorMask) << 3) + row;
+                    colorByte = _videoRam[colorAddr & 0x3FFF];
+                } else {
+                    uint16_t colorAddr = (_state.ColorTableAddress & 0x3FC0) | ((tileIndex >> 3) & 0x1F);
+                    colorByte = _videoRam[colorAddr & 0x3FFF];
+                }
+                tile.CapturedPalette.Data[row] = colorByte;
+                colorHash = (colorHash * 31) + colorByte;
+            }
+        }
+        
+        tile.PaletteColors = colorHash;
+        tile.TileAddr = patternAddr;
+        
+        if(isSprite) {
+            _captureBuffer->ExtraSpriteTiles.push_back(tile);
+        } else {
+            _captureBuffer->ExtraBgTiles.push_back(tile);
+        }
+    };
+    
+    // Scan all BG tiles
+    for(int tileIndex = 0; tileIndex < maxTiles; tileIndex++) {
+        captureTile((uint16_t)tileIndex, false);
+    }
+    
+    // Scan sprite tiles (256 patterns max)
+    for(int tileIndex = 0; tileIndex < 256; tileIndex++) {
+        captureTile((uint16_t)tileIndex, true);
     }
 }

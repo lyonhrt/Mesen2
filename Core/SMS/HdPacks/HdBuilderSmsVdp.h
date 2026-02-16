@@ -29,6 +29,7 @@ public:
     // VRAM scan: capture ALL tiles referenced by nametable and sprite table
     // Runs at frame end to ensure animated/transitional tiles aren't missed
     void ScanVramTiles();
+    void ScanVramTilesSg();
 
 private:
     bool _hdCaptureEnabled = false;
