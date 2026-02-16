@@ -46,6 +46,7 @@ namespace Mesen.Config
 		public bool VerboseLogging { get; set; } = false;
 		public bool ShowPaletteInfo { get; set; } = false;
 		public bool DrawTileBorders { get; set; } = false;
+		public bool DumpAllPaletteVariants { get; set; } = false;
 
 		public HdPackBuilderOptions ToInterop(string saveFolder)
 		{
@@ -60,6 +61,7 @@ namespace Mesen.Config
 				IgnoreOverscan = IgnoreOverscan,
 				GroupRelatedSpriteTiles = GroupRelatedSpriteTiles,
 				DrawTileBorders = DrawTileBorders,
+				DumpAllPaletteVariants = DumpAllPaletteVariants,
 			};
 		}
 	}
@@ -89,5 +91,6 @@ namespace Mesen.Config
 		[MarshalAs(UnmanagedType.I1)] public bool IgnoreOverscan;
 		[MarshalAs(UnmanagedType.I1)] public bool GroupRelatedSpriteTiles;
 		[MarshalAs(UnmanagedType.I1)] public bool DrawTileBorders;
+		[MarshalAs(UnmanagedType.I1)] public bool DumpAllPaletteVariants;
 	}
 }

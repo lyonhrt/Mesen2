@@ -24,6 +24,9 @@ namespace SmsHdPackApi {
     // Check if currently dumping
     bool IsCurrentlyDumping();
 
+    // Called after a power cycle recreates the console - re-attaches builder to new console/VDP
+    void OnConsoleRecreated(Emulator* emu);
+
     // Enable/disable HD tile dumping
     void SetHdTileDumpingEnabled(bool enabled);
 
@@ -46,9 +49,10 @@ namespace SmsHdPackApi {
                                   const uint8_t* tileData32,
                                   int& imgIndex, uint16_t& srcX, uint16_t& srcY, uint32_t& scale);
 
-    // Lookup replacement by canonical hash of (tileData[32], palGroup, isSprite)
+    // Lookup replacement by canonical hash of (tileData[32], palGroup, isSprite, paletteColors)
     bool TryGetReplacementByHash(const uint8_t* tileData32, bool isSprite, uint8_t palGroup,
-                                 int& imgIndex, uint16_t& srcX, uint16_t& srcY, uint32_t& scale);
+                                 int& imgIndex, uint16_t& srcX, uint16_t& srcY, uint32_t& scale,
+                                 uint32_t paletteColors = 0);
 
     // Sample 8 pixels from a replacement row for a given tile row
     // - imgIndex/srcX/srcY/scale come from TryGetReplacement*
@@ -62,6 +66,11 @@ namespace SmsHdPackApi {
     // Returns pointer to ARGB pixel data and dimensions
     bool GetImageData(int imgIndex, const uint32_t*& outPixels, uint32_t& outWidth, uint32_t& outHeight);
     
+    // Get fade brightness for a tile (255 = no fade, <255 = faded).
+    // Call after TryGetReplacementByHash succeeds to check if brightness adjustment is needed.
+    // When the current palette is dimmer than the base palette, returns a proportional brightness value.
+    uint8_t GetFadeBrightness(const uint8_t* tileData32, bool isSprite, uint32_t paletteColors);
+
     // Get the HD pack scale
     uint32_t GetHdPackScale();
     

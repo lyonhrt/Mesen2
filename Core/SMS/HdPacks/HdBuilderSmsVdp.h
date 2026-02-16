@@ -25,6 +25,10 @@ public:
     // Override for SG-1000 capture support (TMS9918 modes)
     void LoadBgTilesSg() override;
     void LoadSpriteTilesSg() override;
+    
+    // VRAM scan: capture ALL tiles referenced by nametable and sprite table
+    // Runs at frame end to ensure animated/transitional tiles aren't missed
+    void ScanVramTiles();
 
 private:
     bool _hdCaptureEnabled = false;
@@ -33,6 +37,12 @@ private:
     
     // Temporary storage for current tile being loaded
     HdSmsTileInfo _currentBgTile;
-    HdSmsTileInfo _currentSpriteTiles[8]; // Max 8 sprites
-    uint8_t _currentSpriteCount = 0;
+    
+    // Double-buffered sprite tiles: sprites loaded during scanline N are used for scanline N+1
+    HdSmsTileInfo _loadingSpriteTiles[8];  // Being loaded during current scanline's hblank
+    HdSmsTileInfo _activeSpriteTiles[8];   // Used by DrawPixel for current scanline
+    int16_t _loadingSpriteX[8];            // Sprite X positions being loaded
+    int16_t _activeSpriteX[8];             // Sprite X positions for current scanline
+    uint8_t _loadingSpriteCount = 0;
+    uint8_t _activeSpriteCount = 0;
 };

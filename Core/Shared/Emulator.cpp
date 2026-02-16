@@ -487,6 +487,12 @@ bool Emulator::InternalLoadRom(VirtualFile romFile, VirtualFile patchFile, bool 
 		pollCounter = console->GetControlManager()->GetPollCounter();
 	}
 
+	// Before destroying the old console, detach the HD pack builder from it
+	// to prevent dangling pointer access during the transition
+	if(forPowerCycle && SmsHdPackApi::IsCurrentlyDumping()) {
+		SmsHdPackApi::OnConsoleRecreated(nullptr);  // null = detach from old console
+	}
+
 	InitConsole(console, originalConsoleMemory, forPowerCycle);
 
 	//Restore pollcounter (used by movies when a power cycle is in the movie)
@@ -534,6 +540,9 @@ bool Emulator::InternalLoadRom(VirtualFile romFile, VirtualFile patchFile, bool 
 		if(smsHdEnabled) {
 			SmsHdPackApi::LoadHdPackIfAvailable(this);
 		}
+	} else {
+		// Power cycle: re-attach builder to the new console if recording was active
+		SmsHdPackApi::OnConsoleRecreated(this);
 	}
 	
 	_threadPaused = false;

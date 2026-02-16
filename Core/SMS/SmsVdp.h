@@ -3,6 +3,7 @@
 #include "SMS/SmsTypes.h"
 #include "Shared/SettingTypes.h"
 #include "Shared/ColorUtilities.h"
+#include "SMS/HdPacks/HdPackSharedConstantsSms.h"
 #include "Utilities/ISerializable.h"
 
 class Emulator;
@@ -43,12 +44,14 @@ public:
 	// Current BG tile info for per-pixel storage (NES parity: stores tile key data)
 	struct HdBgTileInfo {
 		uint8_t TileData[32] = {};   // 32-byte tile pattern
-		uint32_t PaletteColors = 0;  // Packed palette colors
+		SmsHdPackSharedConstants::CapturedPalette CapturedPalette;
+		uint32_t PaletteColors = 0;  // Packed palette colors (legacy)
 		uint8_t PaletteIndex = 0;    // 0 = low palette, 1 = high palette
 		bool HMirror = false;
 		bool VMirror = false;
 		uint8_t RowInTile = 0;
 		bool Valid = false;
+		bool IsSg1000Mode = false;   // True if SG-1000/TMS9918 mode (not SMS Mode 4)
 		uint8_t PixelsRemaining = 0;
 		uint8_t StartColumn = 0;     // Starting column within tile (for fine scroll)
 	};
@@ -57,7 +60,8 @@ public:
 	// Stores tile key data so video filter can do the HD lookup
 	struct HdTilePixelInfo {
 		uint8_t TileData[32] = {};  // 32-byte tile pattern
-		uint32_t PaletteColors = 0; // Packed palette colors
+		SmsHdPackSharedConstants::CapturedPalette CapturedPalette;
+		uint32_t PaletteColors = 0; // Packed palette colors (legacy)
 		uint8_t TileX = 0;          // X position within tile (0-7)
 		uint8_t TileY = 0;          // Y position within tile (0-7)
 		uint8_t ColorIndex = 0;     // Palette color index (0-31) for fallback rendering
@@ -65,6 +69,8 @@ public:
 		bool HMirror = false;
 		bool VMirror = false;
 		bool HasTileData = false;   // True if tile data is valid
+		bool IsSg1000Mode = false;  // True if SG-1000/TMS9918 mode (not SMS Mode 4)
+		bool Priority = false;      // True if BG tile has priority over sprites
 	};
 	
 	struct HdPixelInfo {
@@ -125,10 +131,19 @@ protected:
 	uint8_t _pixelsAvailable = 0;
 	bool _bgHorizontalMirror = false;
 	bool _bgVerticalMirror = false;
-	uint8_t _bgLogicalRow = 0;  // Logical row within tile (0-7, before mirroring)
+	uint8_t _bgLogicalRow = 0;  // Logical row within tile (0-7, before mirroring) - scroll-adjusted
+	uint8_t _bgScreenRow = 0;   // Screen-relative row (scanline & 0x07) - for HD pack rendering
+	uint8_t _hdBorderPixelsRemaining = 0; // Border pixels remaining before first tile's HD data starts
 
-	// NES parity: Current BG tile info for per-pixel storage
-	HdBgTileInfo _hdBgTileInfo = {};
+	// HD tile 3-slot ring buffer: LoadBgTilesSms shifts cur→prev→prev2, writes new to cur.
+	// DrawPixel uses _pixelsAvailable to pick the correct tile and column:
+	//   _pixelsAvailable > 16 → prev2 tile (only with borderWidth=7, max pixAvail=17)
+	//   _pixelsAvailable > 8  → prev tile
+	//   _pixelsAvailable <= 8 → current tile
+	// Column within tile: (8 - _pixelsAvailable) & 7
+	HdBgTileInfo _hdBgTileCur = {};
+	HdBgTileInfo _hdBgTilePrev = {};
+	HdBgTileInfo _hdBgTilePrev2 = {};
 
 	HdTileResult _hdBgTiles[MaxHdTilesPerFrame] = {};
 	HdTileResult _hdSpriteTiles[64 * 2] = {}; // Up to 64 sprites, 2 tiles each (tall sprites)
@@ -152,6 +167,11 @@ protected:
 		// Raw sprite tile index read from sprite table (without pattern base),
 		// used for HD replacement key to match manifest indices
 		uint16_t RawTileIndex = 0;
+
+		// HD: Snapshot of SpriteRow taken during hblank sprite loading.
+		// SpriteRow gets overwritten by sprite evaluation for the next scanline
+		// while rendering is still using it, causing flickering lines.
+		uint8_t HdSpriteRow = 0;
 	};
 
 	uint8_t _evalCounter = 0;

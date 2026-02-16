@@ -53,6 +53,7 @@ struct SmsHdPackInteropOptions {
     bool IgnoreOverscan;
     bool GroupRelatedSpriteTiles;
     bool DrawTileBorders;
+    bool DumpAllPaletteVariants;
 };
 
 SmsConsole::SmsConsole(Emulator* emu)
@@ -120,7 +121,12 @@ LoadRomResult SmsConsole::LoadRom(VirtualFile& romFile)
             _hdFrameBuffers[1] = std::make_unique<HdScreenInfoSms>();
             _hdVdp->SetHdBuffers(_hdFrameBuffers[0].get(), _hdFrameBuffers[1].get());
             // Call the HdBuilderSmsVdp-specific Init with 6 params
-            _hdVdp->Init(_emu, this, _cpu.get(), _controlManager.get(), _memoryManager.get(), false);
+            // Auto-enable capture if recording is already active (e.g. after a reset)
+            bool captureOnInit = SmsHdPackApi::IsCurrentlyDumping();
+            _hdVdp->Init(_emu, this, _cpu.get(), _controlManager.get(), _memoryManager.get(), captureOnInit);
+            if(captureOnInit) {
+                MessageManager::Log("[SMS Console] Auto-enabled HD capture (recording was active)");
+            }
         } else {
             // Call base VDP Init with 5 params
             _vdp->Init(_emu, this, _cpu.get(), _controlManager.get(), _memoryManager.get());
@@ -433,6 +439,8 @@ void SmsConsole::ProcessNotification(ConsoleNotificationType type, void* paramet
                     options.IgnoreOverscan = interop->IgnoreOverscan;
                     options.GroupRelatedSpriteTiles = interop->GroupRelatedSpriteTiles;
                     options.DrawTileBorders = interop->DrawTileBorders;
+                    // Inverted: "Dump all palette variants" ON = don't skip faded sprites
+                    options.SkipFadedSprites = !interop->DumpAllPaletteVariants;
                 }
                 StartRecordingHdPack(options);
                 break;

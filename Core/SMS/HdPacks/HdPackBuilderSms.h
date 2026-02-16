@@ -45,6 +45,8 @@ struct HdPackBuilderOptions {
     bool VerboseLogging = false;       // Extra verbose logging for all operations
     bool UseNesStylePipeline = false;  // Route ProcessTile through simplified NES-style pipeline
     bool DrawTileBorders = false;      // Draw borders around tiles in PNG sheets
+    bool CapturePaletteVariations = false; // Disabled: paletteColors removed from hash, variations are wasted
+    bool SkipFadedSprites = true;            // Skip dumping faded sprite variants; apply fade at render time instead
 };
 
 class HdPackBuilderSms {
@@ -62,6 +64,8 @@ private:
     // Track tile usage
     unordered_map<HdTileKeySms, uint32_t> _tileUsageCount;
     unordered_map<HdTileKeySms, HdPackTileInfoSms*> _tilesByKey;
+    // Palette-sensitive deduplication map (for CapturePaletteVariations mode)
+    unordered_map<HdTileKeySmsPalette, HdPackTileInfoSms*> _tilesByPaletteKey;
     // Canonical deduplication map (pattern + palette selection + sprite flag)
     unordered_map<uint64_t, HdPackTileInfoSms*> _tilesByCanonicalHash;
     // Combined usage count by canonical hash for stable ordering
@@ -107,6 +111,19 @@ private:
     uint32_t _blankTilePalette = 0;
     uint32_t _blankTileCount = 0;  // Count of blank tiles encountered
 
+    // Fade detection: track the "base" (brightest) palette for each tile pattern
+    // Key = FNV-1a hash of TileData[32] + IsSprite, Value = {base PaletteColors, brightness sum}
+    struct BaseTileEntry {
+        uint32_t PaletteColors = 0;
+        uint32_t BrightnessSum = 0; // Sum of R+G+B across first 4 palette entries
+    };
+    std::unordered_map<uint64_t, BaseTileEntry> _baseTileMap;
+    uint32_t _fadedTilesSkipped = 0;
+
+    static uint64_t ComputePatternHash(const uint8_t* tileData, bool isSprite);
+    uint32_t ComputePaletteBrightness(uint32_t paletteColors);
+    bool IsFadedVariant(const HdTileKeySms& key, bool isSprite);
+
 public:
     HdPackBuilderSms(Emulator* emu, SmsConsole* console, HdPackBuilderOptions options);
     ~HdPackBuilderSms();
@@ -120,6 +137,7 @@ public:
     void StopRecording();
     bool IsRecording() const { return _isRecording; }
     void SaveHdPackNow();  // Explicit save method for recording workflow
+    void UpdateConsolePointers(SmsConsole* console);  // Re-attach to new console after power cycle
     
     void SaveHdPack();
     void DumpVramContents(const string& filename);

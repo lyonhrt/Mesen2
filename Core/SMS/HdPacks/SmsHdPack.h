@@ -55,7 +55,21 @@ private:
 	};
 	CachedApiTile _cachedBgTile;
 	CachedApiTile _cachedSpriteTile;
-	uint8_t _cachedBgTileData[4] = {};  // First 4 bytes of tile data for change detection
+	uint8_t _prevBgTileX = 0xFF;
+	int16_t _prevBgTileStart = std::numeric_limits<int16_t>::min();
+	uint8_t _cachedBgTileData[32] = {};
+	uint8_t _cachedBgPaletteIndex = 0;
+	uint32_t _cachedBgPaletteColors = 0;
+	bool _cachedBgHMirror = false;
+	bool _cachedBgVMirror = false;
+
+	__forceinline void InvalidateBgCache()
+	{
+		_useCachedTile = false;
+		_cachedBgTile.Valid = false;
+		_prevBgTileX = 0xFF;
+		_prevBgTileStart = std::numeric_limits<int16_t>::min();
+	}
 
 	// Brightness adjustment
 	__forceinline uint32_t AdjustBrightness(uint8_t input[4], int brightness)
@@ -164,8 +178,10 @@ private:
 		HdTileKeySms key;
 		key.TileIndex = -1; // Use tile data for matching, not index
 		key.PaletteColors = pixel->PaletteColors;
+		key.PaletteIndex = pixel->PaletteIndex;  // Must match hash function
 		key.IsVramTile = true;
 		key.IsSprite = pixel->IsSprite;
+		key.IsSg1000Mode = pixel->IsSg1000Mode;  // Must match hash function
 		memcpy(key.TileData, pixel->TileData, sizeof(key.TileData));
 
 		auto hdTile = _hdData->TileByKey.find(key);
@@ -217,8 +233,10 @@ private:
 		HdTileKeySms key;
 		key.TileIndex = tile->TileIndex;
 		key.PaletteColors = tile->PaletteColors;
+		key.PaletteIndex = tile->PaletteIndex;  // Must match hash function
 		key.IsVramTile = tile->IsVramTile;
 		key.IsSprite = tile->IsSprite;
+		key.IsSg1000Mode = tile->IsSg1000Mode;  // Must match hash function
 		memcpy(key.TileData, tile->TileData, sizeof(key.TileData));
 
 		auto hdTile = _hdData->TileByKey.find(key);
@@ -290,93 +308,217 @@ private:
 		DrawColor(bgColor, outputBuffer, screenWidth);
 
 		if(!pixelInfo) {
+			InvalidateBgCache();
 			return;
 		}
 
 		// Step 1: Draw BG tile (if present)
 		if(pixelInfo->Bg.HasTileData) {
-			uint8_t bgPalGroup = pixelInfo->Bg.PaletteIndex;
-			
-			int imgIndex = -1;
-			uint16_t srcX = 0, srcY = 0;
-			uint32_t hdScale = 1;
-			
-			// NES parity: Invalidate cache when tile data changes
-			// Compare first few bytes of tile data to detect tile boundary
-			// This handles fine scrolling correctly (first tile may not start at TileX=0)
-			bool tileChanged = !_cachedBgTile.Valid;
-			if(_cachedBgTile.Valid) {
-				// Quick check: compare first 4 bytes of tile data
-				if(memcmp(_cachedBgTileData, pixelInfo->Bg.TileData, 4) != 0) {
-					tileChanged = true;
+			// Blank tile fast path: tiles with all-zero pattern data are always solid palette color 0.
+			// Skip hash lookup entirely — blank tiles appear with many different palettes
+			// and we can't capture every variation. The VDP color is always correct.
+			// For SG-1000: only check TileData[0..7] (pattern), not [8..15] (color metadata)
+			// For SMS/GG: check all 32 bytes (4 bitplanes × 8 rows)
+			int patternBytes = pixelInfo->Bg.IsSg1000Mode ? 8 : 32;
+			bool isBlankTile = true;
+			for(int i = 0; i < patternBytes; i++) {
+				if(pixelInfo->Bg.TileData[i] != 0) { isBlankTile = false; break; }
+			}
+
+			if(!isBlankTile) {
+				// For SG-1000 tiles, use PaletteColors (color byte with FG/BG colors)
+				// For SMS/GG tiles, use PaletteIndex (0 or 1)
+				uint8_t bgPalGroup = pixelInfo->Bg.IsSg1000Mode ? (uint8_t)(pixelInfo->Bg.PaletteColors & 0xFF) : pixelInfo->Bg.PaletteIndex;
+				
+				int imgIndex = -1;
+				uint16_t srcX = 0, srcY = 0;
+				uint32_t hdScale = 1;
+				
+				// Detect tile boundary by monitoring TileX wrap (handles fine scroll changes)
+				if(pixelInfo->Bg.TileX <= _prevBgTileX) {
+					_useCachedTile = false;
 				}
-			}
-			
-			if(tileChanged) {
-				_cachedBgTile.Valid = false;
-				// Store tile data for comparison
-				memcpy(_cachedBgTileData, pixelInfo->Bg.TileData, 4);
-			}
-			
-			// Use cached tile if valid (same tile, just different pixel within it)
-			if(_cachedBgTile.Valid) {
-				imgIndex = _cachedBgTile.ImgIndex;
-				srcX = _cachedBgTile.SrcX;
-				srcY = _cachedBgTile.SrcY;
-				hdScale = _cachedBgTile.HdScale;
-			} else if(SmsHdPackApi::TryGetReplacementByHash(pixelInfo->Bg.TileData, false, bgPalGroup,
-			                                          imgIndex, srcX, srcY, hdScale)) {
-				// Cache the result for subsequent pixels of the same tile
-				_cachedBgTile.ImgIndex = imgIndex;
-				_cachedBgTile.SrcX = srcX;
-				_cachedBgTile.SrcY = srcY;
-				_cachedBgTile.HdScale = hdScale;
-				_cachedBgTile.Valid = true;
+				_prevBgTileX = pixelInfo->Bg.TileX;
+
+				int16_t tileStart = static_cast<int16_t>(x) - static_cast<int16_t>(pixelInfo->Bg.TileX);
+				if(tileStart != _prevBgTileStart) {
+					_useCachedTile = false;
+					_prevBgTileStart = tileStart;
+				}
+				
+				bool sameTile = _cachedBgTile.Valid &&
+					memcmp(_cachedBgTileData, pixelInfo->Bg.TileData, sizeof(_cachedBgTileData)) == 0 &&
+					_cachedBgPaletteIndex == bgPalGroup &&
+					_cachedBgPaletteColors == pixelInfo->Bg.PaletteColors &&
+					_cachedBgHMirror == pixelInfo->Bg.HMirror &&
+					_cachedBgVMirror == pixelInfo->Bg.VMirror;
+				if(!sameTile) {
+					_useCachedTile = false;
+				}
+				
+				// Use cached tile if valid (same tile, just different pixel within it)
+				if(_useCachedTile && _cachedBgTile.Valid) {
+					imgIndex = _cachedBgTile.ImgIndex;
+					srcX = _cachedBgTile.SrcX;
+					srcY = _cachedBgTile.SrcY;
+					hdScale = _cachedBgTile.HdScale;
+				} else {
+					// Look up HD replacement for this tile
+					if(SmsHdPackApi::TryGetReplacementByHash(pixelInfo->Bg.TileData, false, bgPalGroup,
+					                                          imgIndex, srcX, srcY, hdScale,
+					                                          pixelInfo->Bg.PaletteColors)) {
+						// Cache the result for subsequent pixels of the same tile
+						_cachedBgTile.ImgIndex = imgIndex;
+						_cachedBgTile.SrcX = srcX;
+						_cachedBgTile.SrcY = srcY;
+						_cachedBgTile.HdScale = hdScale;
+						_cachedBgTile.Valid = true;
+						_useCachedTile = true;
+					} else {
+						// No HD replacement - mark cache as valid but with no replacement
+						_cachedBgTile.ImgIndex = -1;
+						_cachedBgTile.Valid = true;
+						_useCachedTile = true;
+					}
+					// Store tile signature for future comparisons
+					memcpy(_cachedBgTileData, pixelInfo->Bg.TileData, sizeof(_cachedBgTileData));
+					_cachedBgPaletteIndex = bgPalGroup;
+					_cachedBgPaletteColors = pixelInfo->Bg.PaletteColors;
+					_cachedBgHMirror = pixelInfo->Bg.HMirror;
+					_cachedBgVMirror = pixelInfo->Bg.VMirror;
+				}
+				
+				if(imgIndex >= 0) {
+					// Found HD replacement for BG - compute fade brightness and draw
+					uint8_t bgFade = SmsHdPackApi::GetFadeBrightness(
+						pixelInfo->Bg.TileData, false, pixelInfo->Bg.PaletteColors);
+					DrawHdTilePixelFromApi(imgIndex, srcX, srcY, hdScale, 
+					                       pixelInfo->Bg.TileX, pixelInfo->Bg.TileY,
+					                       pixelInfo->Bg.HMirror, pixelInfo->Bg.VMirror,
+					                       outputBuffer, screenWidth, bgFade);
+					
+					// DEBUG: At 1x scale, verify HD pixel matches VDP pixel
+					if constexpr(scale == 1) {
+						static int mismatchCount = 0;
+						uint8_t ci = pixelInfo->Bg.ColorIndex;
+						if(ci > 0 && ci < 32 && mismatchCount < 30) {
+							uint32_t vdpColor = _palette[ci];
+							uint32_t hdColor = *outputBuffer;
+							uint32_t hdAlpha = (hdColor >> 24) & 0xFF;
+							// Only compare if HD pixel is opaque (non-transparent)
+							if(hdAlpha == 0xFF && (hdColor & 0x00FFFFFF) != (vdpColor & 0x00FFFFFF)) {
+								mismatchCount++;
+								// Extract what color index the PNG pixel corresponds to
+								// by reverse-looking up the HD color in the palette
+								int hdPalIdx = -1;
+								for(int pi = 0; pi < 32; pi++) {
+									if((_palette[pi] & 0x00FFFFFF) == (hdColor & 0x00FFFFFF)) { hdPalIdx = pi; break; }
+								}
+								// Show tile data row bytes for the mismatched row
+								uint8_t ty = pixelInfo->Bg.TileY;
+								uint8_t rowOff = ty * 4;
+								MessageManager::Log("[HD Mismatch] x=" + std::to_string(x) + " y=" + std::to_string(y) +
+									" tileX=" + std::to_string(pixelInfo->Bg.TileX) + " tileY=" + std::to_string(ty) +
+									" hMir=" + std::to_string(pixelInfo->Bg.HMirror) + " vMir=" + std::to_string(pixelInfo->Bg.VMirror) +
+									" palIdx=" + std::to_string(pixelInfo->Bg.PaletteIndex) +
+									" colorIdx=" + std::to_string(ci) + " hdPalIdx=" + std::to_string(hdPalIdx) +
+									" vdp=0x" + HexUtilities::ToHex32(vdpColor) + " hd=0x" + HexUtilities::ToHex32(hdColor) +
+									" row[" + std::to_string(ty) + "]=" + 
+									HexUtilities::ToHex(pixelInfo->Bg.TileData[rowOff]) + " " +
+									HexUtilities::ToHex(pixelInfo->Bg.TileData[rowOff+1]) + " " +
+									HexUtilities::ToHex(pixelInfo->Bg.TileData[rowOff+2]) + " " +
+									HexUtilities::ToHex(pixelInfo->Bg.TileData[rowOff+3]) +
+									" srcXY=" + std::to_string(srcX) + "," + std::to_string(srcY));
+							}
+						}
+					}
+				} else {
+					// No HD replacement - draw original BG pixel color
+					uint8_t colorIndex = pixelInfo->Bg.ColorIndex;
+					if(colorIndex < 32) {
+						uint32_t color = _palette[colorIndex];
+						DrawColor(color, outputBuffer, screenWidth);
+					}
+				}
 			} else {
-				// No HD replacement - mark cache as valid but with no replacement
-				_cachedBgTile.ImgIndex = -1;
-				_cachedBgTile.Valid = true;
-			}
-			
-			if(imgIndex >= 0) {
-				// Found HD replacement for BG - draw it
-				DrawHdTilePixelFromApi(imgIndex, srcX, srcY, hdScale, 
-				                       pixelInfo->Bg.TileX, pixelInfo->Bg.TileY,
-				                       pixelInfo->Bg.HMirror, pixelInfo->Bg.VMirror,
-				                       outputBuffer, screenWidth);
-			} else {
-				// No HD replacement - draw original BG pixel color
+				// Blank tile: render VDP color directly (palette color 0 for this tile's palette)
 				uint8_t colorIndex = pixelInfo->Bg.ColorIndex;
-				if(colorIndex < 32) {
-					uint32_t color = _palette[colorIndex];
-					DrawColor(color, outputBuffer, screenWidth);
-				}
+				uint32_t color = (colorIndex < 32) ? _palette[colorIndex] : _palette[0];
+				DrawColor(color, outputBuffer, screenWidth);
 			}
 		}
 
 		// Step 2: Draw sprite on top (if present)
+		// NES parity: Always try HD replacement first - let HD tile alpha control transparency
+		// This allows HD tiles to have content where original sprite was transparent
+		// But skip sprites if BG has priority (and BG pixel is non-transparent)
 		if(pixelInfo->HasSprite && pixelInfo->Sprite.HasTileData) {
+			// Check BG priority: if BG tile has priority and has a non-transparent pixel,
+			// sprites should be hidden behind it (matches VDP behavior)
+			bool bgHasPriority = pixelInfo->Bg.HasTileData && pixelInfo->Bg.Priority;
+			uint8_t bgColorIndex = pixelInfo->Bg.ColorIndex;
+			bool bgNonTransparent = (bgColorIndex != 0);
+			
+			// Skip sprite rendering if BG has priority and is non-transparent
+			if(bgHasPriority && bgNonTransparent) {
+				return;  // Don't draw sprite - it's behind the BG
+			}
+			
+			uint8_t colorIndex = pixelInfo->Sprite.ColorIndex;
+			bool spriteTransparent = (colorIndex == 0 || colorIndex == 0x10);
+			
 			int imgIndex = -1;
 			uint16_t srcX = 0, srcY = 0;
 			uint32_t hdScale = 1;
 			
+			// For SG-1000 sprites, use PaletteColors (sprite color)
+			// For SMS/GG sprites, use palette group 1 (high palette)
+			uint8_t spritePalGroup = pixelInfo->Sprite.IsSg1000Mode ? (uint8_t)(pixelInfo->Sprite.PaletteColors & 0xFF) : 1;
+			
 			// Sprites: Don't cache - multiple different sprites can appear on the same scanline
 			// and caching causes incorrect tiles to be drawn when sprites overlap or change
-			SmsHdPackApi::TryGetReplacementByHash(pixelInfo->Sprite.TileData, true, 1,
-			                                      imgIndex, srcX, srcY, hdScale);
+			SmsHdPackApi::TryGetReplacementByHash(pixelInfo->Sprite.TileData, true, spritePalGroup,
+			                                      imgIndex, srcX, srcY, hdScale,
+			                                      pixelInfo->Sprite.PaletteColors);
 			
 			if(imgIndex >= 0) {
 				// Found HD replacement for sprite - draw it on top of BG
+				static int _sprDbgCount = 0;
+				if(_sprDbgCount < 5) {
+					_sprDbgCount++;
+					const uint32_t* _dbgPx = nullptr; uint32_t _dbgW = 0, _dbgH = 0;
+					SmsHdPackApi::GetImageData(imgIndex, _dbgPx, _dbgW, _dbgH);
+					uint32_t _dbgSample = 0;
+					if(_dbgPx && _dbgW > 0) {
+						uint32_t _sx = srcX + (uint32_t)pixelInfo->Sprite.TileX * scale;
+						uint32_t _sy = srcY + (uint32_t)pixelInfo->Sprite.TileY * scale;
+						if(_sx < _dbgW && _sy < _dbgH) _dbgSample = _dbgPx[_sy * _dbgW + _sx];
+					}
+					MessageManager::Log("[SprHit#" + std::to_string(_sprDbgCount) +
+						"] img=" + std::to_string(imgIndex) +
+						" src=" + std::to_string(srcX) + "," + std::to_string(srcY) +
+						" tXY=" + std::to_string(pixelInfo->Sprite.TileX) + "," + std::to_string(pixelInfo->Sprite.TileY) +
+						" imgWH=" + std::to_string(_dbgW) + "x" + std::to_string(_dbgH) +
+						" px=0x" + HexUtilities::ToHex(_dbgSample) +
+						" scale=" + std::to_string(scale));
+				}
+				uint8_t sprFade = SmsHdPackApi::GetFadeBrightness(
+					pixelInfo->Sprite.TileData, true, pixelInfo->Sprite.PaletteColors);
 				DrawHdTilePixelFromApi(imgIndex, srcX, srcY, hdScale, 
 				                       pixelInfo->Sprite.TileX, pixelInfo->Sprite.TileY,
 				                       pixelInfo->Sprite.HMirror, pixelInfo->Sprite.VMirror,
-				                       outputBuffer, screenWidth);
-			} else {
-				// No HD replacement - draw original sprite pixel color (non-zero only)
-				uint8_t colorIndex = pixelInfo->Sprite.ColorIndex;
-				// Sprite palette is 0x10-0x1F. Color 0 within sprite (0x10) is transparent.
-				// Only draw if it's a valid non-transparent sprite color (0x11-0x1F)
-				if(colorIndex > 0x10 && colorIndex <= 0x1F) {
+				                       outputBuffer, screenWidth, sprFade);
+			} else if(!spriteTransparent) {
+				// No HD replacement - draw original sprite pixel color (only if not transparent)
+				static int _sprMissDbg = 0;
+				if(_sprMissDbg < 5) {
+					_sprMissDbg++;
+					MessageManager::Log("[SprMiss#" + std::to_string(_sprMissDbg) +
+						"] colorIdx=" + std::to_string(colorIndex) +
+						" palColor=0x" + HexUtilities::ToHex(_palette[colorIndex]) +
+						" palGroup=" + std::to_string(spritePalGroup));
+				}
+				if(colorIndex < 32) {
 					uint32_t color = _palette[colorIndex];
 					DrawColor(color, outputBuffer, screenWidth);
 				}
@@ -385,9 +527,12 @@ private:
 	}
 	
 	// Draw HD tile pixel using SmsHdPackApi image data
-	__forceinline void DrawHdTilePixelFromApi(int imgIndex, uint16_t srcX, uint16_t srcY, uint32_t hdScale,
+	// NES parity: Use template scale consistently for both reading PNG and writing output
+	// fadeBrightness: 255 = full brightness (no fade), <255 = apply proportional darkening
+	__forceinline void DrawHdTilePixelFromApi(int imgIndex, uint16_t srcX, uint16_t srcY, uint32_t /*hdScale*/,
 	                                           uint8_t tileX, uint8_t tileY, bool hMirror, bool vMirror,
-	                                           uint32_t* outputBuffer, uint32_t screenWidth)
+	                                           uint32_t* outputBuffer, uint32_t screenWidth,
+	                                           uint8_t fadeBrightness = 255)
 	{
 		// Get the image from the API
 		const uint32_t* imgPixels = nullptr;
@@ -396,17 +541,19 @@ private:
 			return;
 		}
 		
-		// Apply mirroring to get the actual pixel position in the HD tile
-		uint32_t pixelX = tileX;
-		uint32_t pixelY = tileY;
-		if(hMirror) {
-			pixelX = 7 - tileX;
-		}
-		if(vMirror) {
-			pixelY = 7 - tileY;
-		}
+		// NES parity: TileX/TileY already represent the logical position within the tile
+		// as it appears on screen. The HD tile PNG is stored in non-mirrored orientation,
+		// so we need to apply mirroring to map screen position to PNG position.
+		// When HMirror is set: screen column 0 shows tile column 7, so we mirror.
+		// When VMirror is set: screen row 0 shows tile row 7, so we mirror.
+		uint32_t pixelX = hMirror ? (7 - tileX) : tileX;
+		uint32_t pixelY = vMirror ? (7 - tileY) : tileY;
 		
-		// Draw the scale x scale block for this pixel (use template scale, not hdScale from API)
+		// NES parity: Use template scale for tile size (matches how PNG was saved)
+		// srcX/srcY point to the top-left of the tile in the PNG
+		// pixelX/pixelY are the 0-7 position within the 8x8 tile
+		
+		// Draw the scale x scale block for this pixel (matches DrawTilePixel)
 		for(uint32_t dy = 0; dy < scale; dy++) {
 			for(uint32_t dx = 0; dx < scale; dx++) {
 				uint32_t hdX = srcX + pixelX * scale + dx;
@@ -419,6 +566,11 @@ private:
 				uint32_t srcOffset = hdY * imgWidth + hdX;
 				uint32_t rgbValue = imgPixels[srcOffset];
 				uint32_t alpha = (rgbValue >> 24) & 0xFF;
+				
+				// Apply fade brightness if needed (darken RGB channels proportionally)
+				if(fadeBrightness < 255 && alpha > 0) {
+					rgbValue = AdjustBrightness((uint8_t*)&rgbValue, fadeBrightness);
+				}
 				
 				uint32_t* outPtr = outputBuffer + dy * screenWidth + dx;
 				
@@ -467,10 +619,17 @@ private:
 		}
 
 		if(hasSprite) {
+			// Check if BG tile has priority flag set - sprites should be hidden behind it
+			// Only hide sprites if BG has priority AND the BG pixel is non-transparent
+			bool bgHasPriority = pixelInfo.Background.BackgroundPriority && pixelInfo.Background.TileIndex >= 0;
+			
 			for(int k = pixelInfo.SpriteCount - 1; k >= 0; k--) {
 				HdSmsTileInfo& sprite = pixelInfo.Sprites[k];
 				if(sprite.TileIndex < 0) continue;
-				if(sprite.BackgroundPriority && pixelInfo.Background.TileIndex >= 0) continue;
+				
+				// Skip sprite if BG has priority and we drew a non-transparent BG pixel
+				// The hdPackTileInfo check ensures we only hide sprites when there's actual BG content
+				if(bgHasPriority && hdPackTileInfo) continue;
 
 				hdPackSpriteInfo = GetMatchingTile(x, y, &sprite);
 				if(hdPackSpriteInfo) {
@@ -493,8 +652,29 @@ private:
 		SmsVdp* vdp = _console->GetVdp();
 		if(!vdp) return;
 
-		uint8_t* paletteRam = vdp->GetPaletteRam();
+		SmsVdpState state = vdp->GetState();
 		SmsModel model = _console->GetModel();
+
+		// Check if we're in SG-1000/TMS9918 mode (not Mode 4)
+		if(!state.UseMode4) {
+			// SG-1000 mode uses fixed 16-color palette
+			const uint16_t* sgPalette = vdp->GetSmsSgPalette();
+			if(sgPalette) {
+				for(int i = 0; i < 16; i++) {
+					// Convert 15-bit RGB555 to 32-bit ARGB
+					uint16_t rgb555 = sgPalette[i];
+					uint8_t r = ((rgb555 >> 0) & 0x1F) << 3;
+					uint8_t g = ((rgb555 >> 5) & 0x1F) << 3;
+					uint8_t b = ((rgb555 >> 10) & 0x1F) << 3;
+					_palette[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
+					_palette[i + 16] = _palette[i];  // Mirror to sprite palette
+				}
+			}
+			return;
+		}
+
+		// SMS Mode 4 - use palette RAM
+		uint8_t* paletteRam = vdp->GetPaletteRam();
 
 		for(int i = 0; i < 32; i++) {
 			if(model == SmsModel::GameGear) {
@@ -558,6 +738,8 @@ public:
 			_useCachedTile = false;
 			// Invalidate API tile caches at start of each scanline for proper scroll handling
 			_cachedBgTile.Valid = false;
+			_prevBgTileX = 0xFF;
+			_prevBgTileStart = std::numeric_limits<int16_t>::min();
 			_cachedSpriteTile.Valid = false;
 			// screenWidth already includes hdScale, so multiply by hdScale for row stride (hdScale rows per source pixel)
 			uint32_t bufferIndex = (y - overscan.Top) * hdScale * screenWidth;

@@ -1,6 +1,7 @@
 #pragma once
 #include "pch.h"
 #include "SMS/HdPacks/HdPackConditionsSms.h"
+#include "SMS/HdPacks/HdPackSharedConstantsSms.h"
 #include "Utilities/VirtualFile.h"
 #include "Utilities/PNGHelper.h"
 #include "Shared/SettingTypes.h"
@@ -9,21 +10,41 @@
 // SMS-specific HD pack structures
 struct HdTileKeySms {
     int32_t TileIndex = -1;
-    uint32_t PaletteColors = 0;
+    SmsHdPackSharedConstants::CapturedPalette CapturedPalette;
+    uint32_t PaletteColors = 0; // Legacy packed colors (first 4 entries)
     uint8_t TileData[32] = {}; // SMS tiles are 8x8 with 32 bytes (4 bitplanes * 8 rows)
     uint8_t PaletteIndex = 0;  // 0 = low palette, 1 = high palette (used for deduplication)
     bool IsVramTile = false;
     bool IsSprite = false;
+    bool IsSg1000Mode = false; // True if SG-1000/TMS9918 mode (not SMS Mode 4)
 
     bool operator==(const HdTileKeySms& other) const {
         if(IsVramTile || other.IsVramTile) {
-            // Compare by tile data, palette index, and sprite flag
-            return PaletteIndex == other.PaletteIndex && IsSprite == other.IsSprite && 
+            // Compare by tile data, PaletteColors (packed 4 entries), and sprite flag
+            // PaletteColors is used because it's available at both capture and render time
+            return PaletteColors == other.PaletteColors && IsSprite == other.IsSprite && 
+                   IsSg1000Mode == other.IsSg1000Mode &&
                    memcmp(TileData, other.TileData, sizeof(TileData)) == 0;
         } else {
-            // Compare by tile index, palette index, and sprite flag
-            return TileIndex == other.TileIndex && PaletteIndex == other.PaletteIndex && 
-                   IsSprite == other.IsSprite;
+            // Compare by tile index, PaletteColors, and sprite flag
+            return TileIndex == other.TileIndex && PaletteColors == other.PaletteColors && 
+                   IsSprite == other.IsSprite && IsSg1000Mode == other.IsSg1000Mode;
+        }
+    }
+};
+
+// Extended key that includes PaletteColors for capturing palette variations (fade-outs)
+struct HdTileKeySmsPalette : public HdTileKeySms {
+    bool operator==(const HdTileKeySmsPalette& other) const {
+        if(IsVramTile || other.IsVramTile) {
+            // Compare by tile data, palette colors, and sprite flag
+            return PaletteColors == other.PaletteColors && IsSprite == other.IsSprite && 
+                   IsSg1000Mode == other.IsSg1000Mode &&
+                   memcmp(TileData, other.TileData, sizeof(TileData)) == 0;
+        } else {
+            // Compare by tile index, palette colors, and sprite flag
+            return TileIndex == other.TileIndex && PaletteColors == other.PaletteColors && 
+                   IsSprite == other.IsSprite && IsSg1000Mode == other.IsSg1000Mode;
         }
     }
 };
@@ -44,9 +65,34 @@ namespace std {
                 combine(h, static_cast<size_t>(key.TileIndex));
             }
 
-            // Use PaletteIndex directly (0 or 1), then include sprite/background distinction
-            combine(h, static_cast<size_t>(key.PaletteIndex));
+            // Hash must match operator== - include PaletteColors, IsSprite, and IsSg1000Mode
+            combine(h, static_cast<size_t>(key.PaletteColors));
             combine(h, static_cast<size_t>(key.IsSprite ? 1 : 0));
+            combine(h, static_cast<size_t>(key.IsSg1000Mode ? 1 : 0));
+            return h;
+        }
+    };
+
+    // Hash for palette-sensitive key (includes PaletteColors for fade-out capture)
+    template<> struct hash<HdTileKeySmsPalette> {
+        size_t operator()(const HdTileKeySmsPalette& key) const {
+            auto combine = [](size_t& seed, size_t value) {
+                seed ^= value + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+            };
+
+            size_t h = 0;
+            if(key.IsVramTile) {
+                for(int i = 0; i < 32; i++) {
+                    combine(h, static_cast<size_t>(key.TileData[i]));
+                }
+            } else {
+                combine(h, static_cast<size_t>(key.TileIndex));
+            }
+
+            // Hash must match operator== - include PaletteColors, IsSprite, and IsSg1000Mode
+            combine(h, static_cast<size_t>(key.PaletteColors));
+            combine(h, static_cast<size_t>(key.IsSprite ? 1 : 0));
+            combine(h, static_cast<size_t>(key.IsSg1000Mode ? 1 : 0));
             return h;
         }
     };
@@ -101,10 +147,12 @@ struct HdSmsTileInfo : public HdTileKeySms {
     void Reset() {
         TileIndex = -1;
         TileAddr = 0;
+        CapturedPalette.Reset();
         PaletteColors = 0;
         PaletteIndex = 0;  // Inherited from base class
         IsVramTile = false;
         IsSprite = false;
+        IsSg1000Mode = false;  // Must reset to avoid stale values affecting hash/equality
         HorizontalMirroring = false;
         VerticalMirroring = false;
         BackgroundPriority = false;
@@ -137,6 +185,11 @@ struct HdScreenInfoSms {
     unordered_map<uint32_t, uint8_t> WatchedAddressValues;
     vector<HdSmsPixelInfo> ScreenTiles;  // 256x240 = 61440 pixels
     
+    // Extra tiles from VRAM scan (nametable + sprite table walk)
+    // These are processed by ProcessFrame independently of per-pixel data
+    vector<HdSmsTileInfo> ExtraBgTiles;
+    vector<HdSmsTileInfo> ExtraSpriteTiles;
+    
     HdScreenInfoSms() {
         // Pre-allocate for full screen (256x240)
         ScreenTiles.resize(256 * 240);
@@ -146,6 +199,8 @@ struct HdScreenInfoSms {
         for(auto& pixel : ScreenTiles) {
             pixel.Reset();
         }
+        ExtraBgTiles.clear();
+        ExtraSpriteTiles.clear();
     }
 };
 
@@ -166,7 +221,10 @@ struct HdPackTileInfoSms : public HdTileKeySms {
     bool VerticalMirroring = false;   // Added for SMS HD pack conditions
     bool BackgroundPriority = false;  // Added for SMS HD pack conditions
     bool TransparencyRequired = false; // NES parity: tile needs transparency
-    bool Blank = false;                // NES parity: tile is blank/empty
+    bool Blank = false;                // NES parity: tile is blank/empty (all pixels identical)
+    bool SolidColor = false;             // All opaque pixels are the same color (may have transparent pixels)
+    bool ApplyFade = true;               // Apply runtime fade: use base tile + brightness ratio instead of dumping faded variants
+    uint32_t BasePaletteColors = 0;      // Palette colors when tile was originally captured (for fade ratio computation)
     uint8_t PaletteIndex = 0;         // Palette index (0 or 1 for SMS)
     uint32_t VramBankId = 0;
     vector<uint32_t> HdTileData; // HD tile pixel data for PNG generation
@@ -175,7 +233,9 @@ struct HdPackTileInfoSms : public HdTileKeySms {
     HdTileKeySms GetKey(bool defaultKey) {
         HdTileKeySms key = *this;
         if(defaultKey) {
-            key.PaletteColors = 0xFFFFFFFF;
+            memset(key.CapturedPalette.Data, 0xFF, sizeof(key.CapturedPalette.Data));
+            key.CapturedPalette.EntryCount = SmsHdPackSharedConstants::TilePaletteEntryCount;
+            key.CapturedPalette.BytesPerEntry = SmsHdPackSharedConstants::MaxPaletteBytesPerEntry;
         }
         return key;
     }
@@ -189,6 +249,7 @@ struct HdPackTileInfoSms : public HdTileKeySms {
     // NES parity: Analyze tile data for transparency and blank detection
     void UpdateFlags() {
         Blank = true;
+        SolidColor = true;
         TransparencyRequired = false;
         
         if(HdTileData.empty()) {
@@ -196,15 +257,33 @@ struct HdPackTileInfoSms : public HdTileKeySms {
         }
         
         uint32_t firstPixel = HdTileData[0];
+        // Find first opaque pixel color for SolidColor check
+        uint32_t opaqueColor = 0;
+        bool foundOpaque = false;
+        for(uint32_t pixel : HdTileData) {
+            if((pixel >> 24) == 255) {
+                opaqueColor = pixel;
+                foundOpaque = true;
+                break;
+            }
+        }
+        
         for(uint32_t pixel : HdTileData) {
             // Check for transparency (alpha < 255)
             if((pixel >> 24) < 255) {
                 TransparencyRequired = true;
+            } else if(foundOpaque && pixel != opaqueColor) {
+                // Opaque pixel differs from first opaque pixel
+                SolidColor = false;
             }
             // Check if all pixels are the same (blank tile)
             if(pixel != firstPixel) {
                 Blank = false;
             }
+        }
+        // If no opaque pixels at all, it's not really a solid color tile
+        if(!foundOpaque) {
+            SolidColor = false;
         }
     }
     

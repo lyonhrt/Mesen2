@@ -109,6 +109,10 @@
                       IsChecked="{Binding Config.IgnoreOverscan}"
                       IsEnabled="{Binding !IsRecording}" />
 
+            <CheckBox Content="Dump all palette variants (disables fade optimization)" 
+                      IsChecked="{Binding Config.DumpAllPaletteVariants}"
+                      IsEnabled="{Binding !IsRecording}" />
+
             <!-- SMS-specific debug options -->
             <Separator />
             

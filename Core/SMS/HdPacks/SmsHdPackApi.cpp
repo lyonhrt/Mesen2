@@ -48,21 +48,26 @@ namespace SmsHdPackApi {
         }
     };
 
-    struct HdEntry { int ImgIndex=-1; uint16_t X=0; uint16_t Y=0; bool IsSprite=false; uint8_t PaletteGroup=0; };
-    struct ParsedTiles { std::vector<std::array<std::string,7>> rows; std::vector<bool> isSprite; };
+    struct HdEntry { int ImgIndex=-1; uint16_t X=0; uint16_t Y=0; bool IsSprite=false; uint8_t PaletteGroup=0; bool ApplyFade=true; uint32_t BasePaletteColors=0; };
+    struct ParsedTiles { std::vector<std::array<std::string,10>> rows; std::vector<bool> isSprite; };
     static bool g_hdReplacementEnabled = true;
     static bool g_hdPackLoaded = false;
     static uint32_t g_hdPackScale = 1;
+
+    // Palette format for fade brightness computation
+    enum class HdPaletteFormat { Sms, GameGear };
+    static HdPaletteFormat g_hdPaletteFormat = HdPaletteFormat::Sms;
     static std::vector<HdImage> g_hdImages;
     static std::unordered_map<HdKey,HdEntry,HdKeyHash> g_hdMap;
     static std::unordered_map<uint64_t, HdEntry> g_hdHashMap; // pattern+pal+isSprite hash -> entry
+    static std::unordered_map<uint64_t, HdEntry> g_hdPatternMap; // pattern+isSprite hash -> base entry (for fade fallback)
 
     // Dumping state (shared with UI + VDP hooks)
     static bool g_isDumping = false;
 
-    static inline uint64_t ComputeCanonicalHash(const uint8_t* tileData32, bool isSprite, uint8_t palGroup)
+    // Pattern-only hash: ignores palette, used for fade fallback lookups
+    static inline uint64_t ComputePatternOnlyHash(const uint8_t* tileData32, bool isSprite)
     {
-        // Matches HdPackBuilderSms::GetCanonicalHash: FNV-1a over 32 bytes, then palGroup, then sprite flag
         const uint64_t FNV_OFFSET = 1469598103934665603ULL;
         const uint64_t FNV_PRIME  = 1099511628211ULL;
         uint64_t h = FNV_OFFSET;
@@ -70,11 +75,38 @@ namespace SmsHdPackApi {
             h ^= (uint64_t)tileData32[i];
             h *= FNV_PRIME;
         }
-        h ^= (uint64_t)palGroup; h *= FNV_PRIME;
+        // Hash zero palette (pattern-only key)
+        for(int i = 0; i < 4; i++) {
+            h ^= 0ULL;
+            h *= FNV_PRIME;
+        }
         h ^= (uint64_t)(isSprite ? 1 : 0); h *= FNV_PRIME;
         return h;
     }
 
+    static inline uint64_t ComputeCanonicalHash(const uint8_t* tileData32, bool isSprite, uint8_t /*palGroup*/, uint32_t paletteColors = 0)
+    {
+        // Matches HdPackBuilderSms::GetCanonicalHash: FNV-1a over 32 bytes, then PaletteColors (4 bytes), then sprite flag
+        // PaletteColors encodes the first 4 palette entries and is available at both capture and render time
+        const uint64_t FNV_OFFSET = 1469598103934665603ULL;
+        const uint64_t FNV_PRIME  = 1099511628211ULL;
+        uint64_t h = FNV_OFFSET;
+        for(int i = 0; i < 32; i++) {
+            h ^= (uint64_t)tileData32[i];
+            h *= FNV_PRIME;
+        }
+        // Hash PaletteColors byte-by-byte (must match builder's GetCanonicalHash)
+        for(int i = 0; i < 4; i++) {
+            h ^= (uint64_t)((paletteColors >> (i*8)) & 0xFF);
+            h *= FNV_PRIME;
+        }
+        h ^= (uint64_t)(isSprite ? 1 : 0); h *= FNV_PRIME;
+        return h;
+    }
+
+    static uint8_t ComputeFadeBrightness(uint32_t currentPaletteColors, uint32_t basePaletteColors);
+
+#ifdef SMS_HD_DEBUG
     static std::string BytesToHex(const uint8_t* data, size_t len, size_t maxOut = 32)
     {
         if(!data) return std::string();
@@ -90,6 +122,7 @@ namespace SmsHdPackApi {
     {
         std::ostringstream ss; ss << std::uppercase << std::hex << std::setw(16) << std::setfill('0') << v; return ss.str();
     }
+#endif
 
     static bool ParseHexToBytes(const std::string& hex, std::array<uint8_t,32>& out)
     {
@@ -130,19 +163,40 @@ namespace SmsHdPackApi {
             rtrim(line); ltrim(line);
             if(line.empty()) continue;
             if(line[0] == '#') {
-                // Section header: #filename.png
+                // Section header comment
                 std::string name = line.substr(1);
                 ltrim(name); rtrim(name);
-                // Consider sheets named SPRITES_###.png as sprite sheets
-                sectionIsSprite = (name.find("SPRITES") != std::string::npos);
+                // Convert to uppercase for case-insensitive matching
+                std::string upper = name;
+                for(auto& c : upper) c = (char)toupper((unsigned char)c);
+                // Detect sprite section by looking for "SPRITE" or "SOLID_SPR" in the comment
+                // Detect BG section by looking for "BACKGROUND", "BGTILE", or "SOLID_BG" (sheet filenames)
+                // IMPORTANT: Check BG patterns first since "SPRITES" doesn't contain "BGTILE"
+                if(upper.find("BGTILE") != std::string::npos || upper.find("BACKGROUND") != std::string::npos || upper.find("SOLID_BG") != std::string::npos) {
+                    sectionIsSprite = false;
+                    MessageManager::Log("[SMS HD Pack] Section: BG (from '" + name + "')");
+                } else if(upper.find("SPRITE") != std::string::npos || upper.find("SOLID_SPR") != std::string::npos) {
+                    sectionIsSprite = true;
+                    MessageManager::Log("[SMS HD Pack] Section: SPRITE (from '" + name + "')");
+                }
                 continue;
             }
             if(line.rfind("<scale>", 0) == 0) {
                 std::string rest = line.substr(7);
-                // Stop at next tag if present
                 size_t lt = rest.find('<'); if(lt != std::string::npos) rest = rest.substr(0, lt);
                 ltrim(rest); rtrim(rest);
                 try { int s = std::stoi(rest); if(s >= 1 && s <= 10) outScale = (uint32_t)s; } catch(...) {}
+                continue;
+            }
+            if(line.rfind("<paletteFormat>", 0) == 0) {
+                std::string fmt = line.substr(15); ltrim(fmt); rtrim(fmt);
+                for(auto& c : fmt) c = (char)tolower((unsigned char)c);
+                if(fmt == "gg" || fmt == "gamegear") {
+                    g_hdPaletteFormat = HdPaletteFormat::GameGear;
+                } else {
+                    g_hdPaletteFormat = HdPaletteFormat::Sms;
+                }
+                MessageManager::Log("[SMS HD Pack] Palette format: " + fmt);
                 continue;
             }
             if(line.rfind("<img>", 0) == 0) {
@@ -155,17 +209,20 @@ namespace SmsHdPackApi {
                 // Remove possible trailing closing tag
                 size_t close = content.find("</tile>"); if(close != std::string::npos) content = content.substr(0, close);
                 // Split by comma
-                std::vector<std::string> parts; parts.reserve(8);
+                std::vector<std::string> parts; parts.reserve(10);
                 std::stringstream ss(content); std::string tok;
                 while(std::getline(ss, tok, ',')) { ltrim(tok); rtrim(tok); parts.push_back(tok); }
                 if(parts.size() < 5) continue; // require at least imgIndex, tileHex, paletteHex, x, y
-                std::array<std::string,7> row{};
-                for(size_t i=0;i<7;i++) {
+                std::array<std::string,10> row{};
+                for(size_t i=0;i<10;i++) {
                     row[i] = (i < parts.size()) ? parts[i] : std::string();
                 }
                 // Ensure brightness and default fields present (indices 5,6)
                 if(row[5].empty()) row[5] = "1";
                 if(row[6].empty()) row[6] = "N";
+                // row[7] = PaletteColors hex (optional, may be empty for old packs)
+                // row[8] = ApplyFade flag: Y/N (optional, default Y)
+                // row[9] = BasePaletteColors hex (optional, used with ApplyFade)
                 outTiles.rows.push_back(row);
                 outTiles.isSprite.push_back(sectionIsSprite);
                 continue;
@@ -176,7 +233,7 @@ namespace SmsHdPackApi {
 
     void LoadHdPackIfAvailable(Emulator* emu)
     {
-        g_hdPackLoaded = false; g_hdImages.clear(); g_hdMap.clear(); g_hdHashMap.clear(); g_hdPackScale = 1;
+        g_hdPackLoaded = false; g_hdImages.clear(); g_hdMap.clear(); g_hdHashMap.clear(); g_hdPatternMap.clear(); g_hdPackScale = 1; g_hdPaletteFormat = HdPaletteFormat::Sms;
 
         if(!emu || emu->GetConsoleType()!=ConsoleType::Sms) return;
         std::string packFolder = FolderUtilities::CombinePath(FolderUtilities::GetHdPackFolder(), FolderUtilities::GetFilename(emu->GetRomInfo().RomFile.GetFileName(), false));
@@ -234,14 +291,41 @@ namespace SmsHdPackApi {
             // Sprites always use high palette (1)
             if(isSpr) palGroup = 1;
 
-            HdEntry entry{ imgIndex, (uint16_t)x, (uint16_t)y, isSpr, palGroup };
+            HdEntry entry{ imgIndex, (uint16_t)x, (uint16_t)y, isSpr, palGroup, true, 0 };
+
+            // Parse PaletteColors from field 7 (hex) if present
+            uint32_t paletteColors = 0;
+            if(!p[7].empty()) {
+                try { paletteColors = (uint32_t)std::stoul(p[7], nullptr, 16); } catch(...) {}
+            }
+
+            // Parse ApplyFade from field 8 (Y/N, default Y)
+            if(!p[8].empty()) {
+                entry.ApplyFade = (p[8][0] == 'Y' || p[8][0] == 'y');
+            }
+            // Parse BasePaletteColors from field 9 (hex)
+            if(!p[9].empty()) {
+                try { entry.BasePaletteColors = (uint32_t)std::stoul(p[9], nullptr, 16); } catch(...) {}
+            } else {
+                entry.BasePaletteColors = paletteColors; // Default: base = current
+            }
 
             // New format: 32-byte pattern hex; fallback: index hex
             if(tileField.size() >= 64) {
                 std::array<uint8_t,32> pattern{};
                 if(ParseHexToBytes(tileField, pattern)) {
-                    uint64_t h = ComputeCanonicalHash(pattern.data(), isSpr, palGroup);
+                    uint64_t h = ComputeCanonicalHash(pattern.data(), isSpr, palGroup, paletteColors);
                     g_hdHashMap[h] = entry;
+
+                    // Build pattern-only fallback map for fade support
+                    // Only store the first (base) tile per pattern — tiles with ApplyFade=Y
+                    if(entry.ApplyFade) {
+                        uint64_t patHash = ComputePatternOnlyHash(pattern.data(), isSpr);
+                        if(g_hdPatternMap.find(patHash) == g_hdPatternMap.end()) {
+                            g_hdPatternMap[patHash] = entry;
+                        }
+                    }
+
                     if(s_tileLogCount < 16) {
                         s_tileLogCount++;
                         HDLOG_TAG("MapTile", std::string("mode=hash img=") + std::to_string(imgIndex) +
@@ -277,7 +361,9 @@ namespace SmsHdPackApi {
         MessageManager::Log("[SMS HD Pack] Loaded HD pack: " + packFolder + 
             ", imgs=" + std::to_string(g_hdImages.size()) + 
             ", indexEntries=" + std::to_string(g_hdMap.size()) +
-            ", hashEntries=" + std::to_string(g_hdHashMap.size()));
+            ", hashEntries=" + std::to_string(g_hdHashMap.size()) +
+            ", patternEntries=" + std::to_string(g_hdPatternMap.size()) +
+            ", scale=" + std::to_string(g_hdPackScale));
 
         // Debug: dump a small sample of hash entries
         int sample = 0;
@@ -327,22 +413,109 @@ namespace SmsHdPackApi {
     }
 
     bool TryGetReplacementByHash(const uint8_t* tileData32, bool isSprite, uint8_t palGroup,
-                                 int& imgIndex, uint16_t& srcX, uint16_t& srcY, uint32_t& scale)
+                                 int& imgIndex, uint16_t& srcX, uint16_t& srcY, uint32_t& scale,
+                                 uint32_t paletteColors)
     {
         if(!IsHdReplacementEnabled() || !tileData32) return false;
         
-        uint64_t h = ComputeCanonicalHash(tileData32, isSprite, palGroup);
+        uint64_t h = ComputeCanonicalHash(tileData32, isSprite, palGroup, paletteColors);
         auto it = g_hdHashMap.find(h);
-        if(it == g_hdHashMap.end()) {
-            return false;
+        if(it != g_hdHashMap.end()) {
+            const HdEntry& e = it->second;
+            imgIndex = e.ImgIndex;
+            srcX = e.X;
+            srcY = e.Y;
+            scale = g_hdPackScale;
+            return true;
         }
         
-        const HdEntry& e = it->second;
-        imgIndex = e.ImgIndex;
-        srcX = e.X;
-        srcY = e.Y;
-        scale = g_hdPackScale;
-        return true;
+        // Exact palette match failed — try fade fallback (pattern-only lookup)
+        // Only accept if the current palette is a proportionally dimmer version of the base palette.
+        // Reject if brightness is >= base (not a fade) or ratio is too low (completely different palette).
+        if(!g_hdPatternMap.empty()) {
+            uint64_t patHash = ComputePatternOnlyHash(tileData32, isSprite);
+            auto patIt = g_hdPatternMap.find(patHash);
+            if(patIt != g_hdPatternMap.end() && patIt->second.ApplyFade) {
+                uint8_t fadeBright = ComputeFadeBrightness(paletteColors, patIt->second.BasePaletteColors);
+                // Accept only if actually dimmer (fadeBright < 255) and not a wildly different palette (>= 25)
+                if(fadeBright < 255 && fadeBright >= 25) {
+                    const HdEntry& e = patIt->second;
+                    imgIndex = e.ImgIndex;
+                    srcX = e.X;
+                    srcY = e.Y;
+                    scale = g_hdPackScale;
+                    return true;
+                }
+            }
+        }
+
+        // Debug: log first few misses
+        static int missCount = 0;
+        if(missCount < 20 && g_hdPackLoaded) {
+            missCount++;
+            std::ostringstream ss;
+            ss << std::uppercase << std::hex << std::setfill('0');
+            for(int i = 0; i < 4; i++) ss << std::setw(2) << (int)tileData32[i];
+            ss << "...";
+            MessageManager::Log("[HD Miss #" + std::to_string(missCount) + "] hash=0x" + Hex64_16(h) +
+                " spr=" + std::to_string(isSprite) +
+                " pal=" + std::to_string(palGroup) +
+                " palColors=0x" + HexUtilities::ToHex(paletteColors) +
+                " data=" + ss.str() +
+                " mapSize=" + std::to_string(g_hdHashMap.size()));
+        }
+        return false;
+    }
+
+    // Compute per-channel brightness ratio between current and base palette.
+    // Returns a 0-255 brightness value (255 = same as base, 0 = fully dark).
+    // Uses the average brightness ratio across the first 4 palette entries.
+    // Handles both SMS (--BBGGRR, 2 bits/channel) and GG (GGGGRRRR low byte, 4 bits/channel) formats.
+    static uint8_t ComputeFadeBrightness(uint32_t currentPaletteColors, uint32_t basePaletteColors)
+    {
+        if(currentPaletteColors == basePaletteColors) return 255;
+        
+        uint32_t baseSum = 0, curSum = 0;
+        for(int i = 0; i < 4; i++) {
+            uint8_t baseEntry = (basePaletteColors >> (i * 8)) & 0xFF;
+            uint8_t curEntry = (currentPaletteColors >> (i * 8)) & 0xFF;
+            if(g_hdPaletteFormat == HdPaletteFormat::GameGear) {
+                // GG PaletteColors packs the low byte of each 2-byte entry: GGGGRRRR
+                // Extract R (low nibble) and G (high nibble) from the low byte
+                baseSum += (baseEntry & 0x0F) + ((baseEntry >> 4) & 0x0F);
+                curSum += (curEntry & 0x0F) + ((curEntry >> 4) & 0x0F);
+            } else {
+                // SMS palette: --BBGGRR (2 bits per channel)
+                baseSum += (baseEntry & 0x03) + ((baseEntry >> 2) & 0x03) + ((baseEntry >> 4) & 0x03);
+                curSum += (curEntry & 0x03) + ((curEntry >> 2) & 0x03) + ((curEntry >> 4) & 0x03);
+            }
+        }
+        
+        if(baseSum == 0) return 255; // Avoid division by zero
+        uint32_t ratio = (curSum * 255) / baseSum;
+        return (uint8_t)std::min(ratio, (uint32_t)255);
+    }
+
+    // Get the fade brightness for a tile (255 = no fade, <255 = faded).
+    // Call after TryGetReplacementByHash succeeds to determine if brightness adjustment is needed.
+    uint8_t GetFadeBrightness(const uint8_t* tileData32, bool isSprite, uint32_t paletteColors)
+    {
+        if(!tileData32) return 255;
+        
+        // Check if exact match exists (no fade needed)
+        uint64_t h = ComputeCanonicalHash(tileData32, isSprite, 0, paletteColors);
+        if(g_hdHashMap.find(h) != g_hdHashMap.end()) {
+            return 255; // Exact match — no fade
+        }
+        
+        // Pattern-only fallback — compute fade brightness
+        uint64_t patHash = ComputePatternOnlyHash(tileData32, isSprite);
+        auto patIt = g_hdPatternMap.find(patHash);
+        if(patIt != g_hdPatternMap.end() && patIt->second.ApplyFade) {
+            return ComputeFadeBrightness(paletteColors, patIt->second.BasePaletteColors);
+        }
+        
+        return 255;
     }
 
     bool SampleReplacementRow8(int imgIndex, uint16_t srcX, uint16_t srcY, uint32_t scale,
@@ -601,34 +774,46 @@ namespace SmsHdPackApi {
     // Function to be called from SMS VDP during tile rendering
     void ProcessFrameIfReady(Emulator* emu)
     {
+        static int callCount = 0;
+        callCount++;
+
         if(!g_isDumping || !emu) {
             return;
         }
 
         auto consolePtr = emu->GetConsole();
         if(!consolePtr) {
+            if(callCount <= 10) MessageManager::Log("[HD API] ProcessFrameIfReady: no console");
             return;
         }
 
         SmsConsole* smsConsole = static_cast<SmsConsole*>(consolePtr.get());
         if(!smsConsole) {
+            if(callCount <= 10) MessageManager::Log("[HD API] ProcessFrameIfReady: smsConsole null");
             return;
         }
 
         HdBuilderSmsVdp* hdVdp = smsConsole->GetHdBuilderSmsVdp();
         if(!hdVdp || !hdVdp->IsHdCaptureEnabled()) {
+            if(callCount <= 10) MessageManager::Log("[HD API] ProcessFrameIfReady: hdVdp=" + std::to_string((uint64_t)hdVdp) +
+                ", enabled=" + std::to_string(hdVdp ? hdVdp->IsHdCaptureEnabled() : false));
             return;
         }
 
         HdScreenInfoSms* readyFrame = hdVdp->SwapBuffersOnFrameEnd();
         if(!readyFrame || readyFrame == g_lastProcessedFrame) {
+            if(callCount <= 10) MessageManager::Log("[HD API] ProcessFrameIfReady: readyFrame=" + std::to_string((uint64_t)readyFrame) +
+                ", lastProcessed=" + std::to_string((uint64_t)g_lastProcessedFrame) + " (skipped)");
             return;
         }
 
         g_lastProcessedFrame = readyFrame;
 
         if(g_hdPackBuilder) {
+            if(callCount <= 10) MessageManager::Log("[HD API] ProcessFrameIfReady: calling ProcessFrame (call #" + std::to_string(callCount) + ")");
             g_hdPackBuilder->ProcessFrame(readyFrame);
+        } else {
+            if(callCount <= 10) MessageManager::Log("[HD API] ProcessFrameIfReady: g_hdPackBuilder is null!");
         }
 
     }
@@ -636,6 +821,32 @@ namespace SmsHdPackApi {
     // Check if currently dumping
     bool IsCurrentlyDumping() {
         return g_isDumping;
+    }
+    
+    // Called during power cycle to manage HD pack builder lifecycle.
+    // Pass emu=nullptr BEFORE old console is destroyed (detach stale pointers).
+    // Pass valid emu AFTER new console is created (re-attach to new console).
+    void OnConsoleRecreated(Emulator* emu) {
+        if(!g_isDumping || !g_hdPackBuilder) {
+            return;
+        }
+        
+        // Nullify stale frame pointer immediately
+        g_lastProcessedFrame = nullptr;
+        
+        if(!emu) {
+            // Detach: null out console/VDP pointers before old console is destroyed
+            g_hdPackBuilder->UpdateConsolePointers(nullptr);
+            return;
+        }
+        
+        if(emu->GetConsoleType() != ConsoleType::Sms) {
+            return;
+        }
+        
+        // Re-attach builder to the new console
+        SmsConsole* smsConsole = static_cast<SmsConsole*>(emu->GetConsole().get());
+        g_hdPackBuilder->UpdateConsolePointers(smsConsole);
     }
     
     // Enable/disable HD tile dumping
