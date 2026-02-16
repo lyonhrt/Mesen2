@@ -2,6 +2,7 @@
 #include "WS/WsEeprom.h"
 #include "WS/WsConsole.h"
 #include "Shared/Emulator.h"
+#include "Shared/EmuSettings.h"
 #include "Shared/BatteryManager.h"
 #include "Utilities/BitUtilities.h"
 #include "Utilities/Serializer.h"
@@ -18,6 +19,11 @@ WsEeprom::WsEeprom(Emulator* emu, WsConsole* console, WsEepromSize size, uint8_t
 	_state.WriteDisabled = true;
 
 	if(_isInternal) {
+		if(!emu->GetSettings()->GetWsConfig().UseBootRom) {
+			//Boot ROM leaves writes enabled
+			_state.WriteDisabled = false;
+		}
+
 		InitInternalEepromData();
 	}
 }
@@ -112,8 +118,55 @@ void WsEeprom::InitInternalEepromData()
 	memcpy(_data + 0x60, ConvertToEepromString(name).c_str(), name.size());
 }
 
-void WsEeprom::WritePort(uint8_t port, uint8_t value)
+void WsEeprom::Run()
 {
+	if(!_emu->IsEmulationThread()) {
+		return;
+	}
+
+	if(_state.CmdStartClock) {
+		WsEepromCommand cmd = GetCommand();
+		int cmdDelay = 10; //TODOWS timing
+		if(_console->GetMasterClock() - _state.CmdStartClock > cmdDelay) {
+			uint16_t addr = GetCommandAddress();
+
+			switch(cmd) {
+				case WsEepromCommand::Read:
+					_state.ReadBuffer = _data[addr << 1] | (_data[(addr << 1) + 1] << 8);
+					_state.ReadDone = true;
+					break;
+
+				case WsEepromCommand::Write:
+					WriteValue(addr, _state.WriteBuffer);
+					break;
+
+				case WsEepromCommand::WriteAll:
+					for(int i = 0; i < (int)_state.Size; i += 2) {
+						WriteValue(i >> 1, _state.WriteBuffer);
+					}
+					break;
+
+				case WsEepromCommand::Erase:
+					WriteValue(addr, 0xFFFF);
+					break;
+
+				case WsEepromCommand::EraseAll:
+					for(int i = 0; i < (int)_state.Size; i += 2) {
+						WriteValue(i >> 1, 0xFFFF);
+					}
+					break;
+			}
+
+			_state.Idle = true;
+			_state.CmdStartClock = 0;
+		}
+	}
+}
+
+void WsEeprom::WritePort(uint8_t port, uint8_t value)
+{ 
+	Run();
+
 	switch(port) {
 		case 0x00: BitUtilities::SetBits<0>(_state.WriteBuffer, value); break;
 		case 0x01: BitUtilities::SetBits<8>(_state.WriteBuffer, value); break;
@@ -136,49 +189,47 @@ void WsEeprom::WritePort(uint8_t port, uint8_t value)
 				return;
 			}
 
+			if(!_state.Idle) {
+				return;
+			}
+
 			WsEepromCommand cmd = GetCommand();
 			uint16_t addr = GetCommandAddress();
 
 			if(read) {
 				if(cmd == WsEepromCommand::Read) {
-					//TODOWS
-					//For the internal eeprom, "ReadDone" flag should be cleared here, and set again after a small delay
-					//On cartridge eeprom, the flag is bugged and not reset when a read starts
-					//The read buffer should also only be set after a delay (e.g after the read is done), for both eeproms
-					_state.ReadBuffer = _data[addr << 1] | (_data[(addr << 1) + 1] << 8);
+					_state.CmdStartClock = _console->GetMasterClock();
+
+					if(_isInternal) {
+						//For the internal eeprom, "ReadDone" flag should be cleared here, and set again after a small delay
+						//For the cartridge eeprom, the flag is bugged and not reset when a read starts
+						_state.ReadDone = false;
+					}
+					_state.Idle = false;
+
 					if(_isInternal) {
 						_emu->ProcessMemoryAccess<CpuType::Ws, MemoryType::WsInternalEeprom, MemoryOperationType::Read>(addr << 1, _state.ReadBuffer);
 					} else {
 						_emu->ProcessMemoryAccess<CpuType::Ws, MemoryType::WsCartEeprom, MemoryOperationType::Read>(addr << 1, _state.ReadBuffer);
 					}
-					_state.ReadDone = true;
 				}
 			} else if(write) {
-				_state.ReadDone = false;
-
-				if(cmd == WsEepromCommand::Write) {
-					WriteValue(addr, _state.WriteBuffer);
-				} else if(cmd == WsEepromCommand::WriteAll) {
-					for(int i = 0; i < (int)_state.Size; i += 2) {
-						WriteValue(i >> 1, _state.WriteBuffer);
-					}
+				if(cmd == WsEepromCommand::Write || cmd == WsEepromCommand::WriteAll) {
+					_state.ReadDone = false;
+					_state.CmdStartClock = _console->GetMasterClock();
+					_state.Idle = false;
 				}
 			} else if(other) {
 				_state.ReadDone = false;
 
 				switch(cmd) {
 					case WsEepromCommand::Erase:
-						WriteValue(addr, 0xFFFF);
+					case WsEepromCommand::EraseAll:
+						_state.CmdStartClock = _console->GetMasterClock();
 						break;
 
 					case WsEepromCommand::WriteDisable:
 						_state.WriteDisabled = true;
-						break;
-
-					case WsEepromCommand::EraseAll:
-						for(int i = 0; i < (int)_state.Size; i += 2) {
-							WriteValue(i >> 1, 0xFFFF);
-						}
 						break;
 
 					case WsEepromCommand::WriteEnable:
@@ -192,6 +243,8 @@ void WsEeprom::WritePort(uint8_t port, uint8_t value)
 
 uint8_t WsEeprom::ReadPort(uint8_t port)
 {
+	Run();
+
 	switch(port) {
 		case 0x00: return BitUtilities::GetBits<0>(_state.ReadBuffer);
 		case 0x01: return BitUtilities::GetBits<8>(_state.ReadBuffer);
@@ -230,4 +283,5 @@ void WsEeprom::Serialize(Serializer& s)
 	SV(_state.ReadDone);
 	SV(_state.Idle);
 	SV(_state.InternalEepromWriteProtected);
+	SV(_state.CmdStartClock);
 }

@@ -1,18 +1,21 @@
 #include "pch.h"
 #include "WS/WsCpu.h"
+#include "WS/WsConsole.h"
 #include "WS/WsMemoryManager.h"
 #include "Shared/Emulator.h"
+#include "Shared/MessageManager.h"
 #include "Utilities/HexUtilities.h"
 #include "Utilities/Serializer.h"
 
 WsCpuParityTable WsCpu::_parity = {};
 
-WsCpu::WsCpu(Emulator* emu, WsMemoryManager* memoryManager)
+WsCpu::WsCpu(Emulator* emu, WsConsole* console, WsMemoryManager* memoryManager)
 #ifndef DUMMYCPU
 	: _prefetch(this, memoryManager)
 #endif
 {
 	_emu = emu;
+	_console = console;
 	_memoryManager = memoryManager;
 
 	_state.CS = 0xFFFF;
@@ -41,7 +44,7 @@ void WsCpu::Exec()
 {
 #ifndef DUMMYCPU
 	bool irqPending = _memoryManager->HasPendingIrq();
-	if(_state.Halted && !irqPending) {
+	if(_state.Halted && (!irqPending || _state.PowerOff)) {
 		Idle();
 		_emu->ProcessHaltedCpu<CpuType::Ws>();
 		return;
@@ -405,14 +408,14 @@ void WsCpu::CallFar()
 {
 	uint16_t offset = ReadCodeWord();
 	uint16_t segment = ReadCodeWord();
+	Push(_state.CS);
+	Push(_state.IP);
 	CallFar(segment, offset);
 }
 
 void WsCpu::CallFar(uint16_t segment, uint16_t offset)
 {
 	Idle<6>();
-	Push(_state.CS);
-	Push(_state.IP);
 	_state.CS = segment;
 	_state.IP = offset;
 	ClearPrefetch();
@@ -629,7 +632,6 @@ void WsCpu::SAHF()
 
 void WsCpu::LdsLesLeaModRm()
 {
-	ReadModRmByte();
 	if(_modRm.Mode == 3) {
 		//These instructions change the behavior of mode 3 (reg)
 		_modRm.Mode = 0;
@@ -654,6 +656,7 @@ void WsCpu::LdsLesLeaModRm()
 uint16_t WsCpu::LoadSegment()
 {
 	Idle<4>();
+	ReadModRmByte();
 	LdsLesLeaModRm();
 
 	uint16_t value = GetModRm<uint16_t>();
@@ -676,6 +679,7 @@ void WsCpu::LES()
 void WsCpu::LEA()
 {
 	Idle();
+	ReadModRmByte();
 	LdsLesLeaModRm();
 	SetModRegister(_modRm.Register, _modRm.Offset);
 }
@@ -819,6 +823,10 @@ void WsCpu::Halt()
 {
 	Idle<12>();
 	_state.Halted = true;
+	if(_memoryManager->IsPowerOffRequested()) {
+		MessageManager::DisplayMessage("WS", "Power off.");
+		_state.PowerOff = true;
+	}
 }
 
 void WsCpu::SuppressIrq(bool suppressTrap)
@@ -1004,6 +1012,10 @@ void WsCpu::Grp45ModRm()
 			break;
 
 		case 0x03: {
+			Push(_state.CS);
+			Push(_state.IP);
+
+			LdsLesLeaModRm();
 			uint16_t offset = GetModRm<uint16_t>();
 			_modRm.Offset += 2;
 			uint16_t segment = GetModRm<uint16_t>();
@@ -1020,6 +1032,7 @@ void WsCpu::Grp45ModRm()
 		}
 
 		case 0x05: {
+			LdsLesLeaModRm();
 			Idle<7>();
 			uint16_t offset = GetModRm<uint16_t>();
 			_modRm.Offset += 2;
@@ -1315,7 +1328,7 @@ void WsCpu::MulUnsigned(T x, T y)
 	_state.Flags.AuxCarry = false;
 	_state.Flags.Parity = false;
 	_state.Flags.Sign = false;
-	_state.Flags.Zero = true;
+	_state.Flags.Zero = _console->GetModel() != WsModel::Monochrome;
 
 	_mulOverflow = overflow;
 
@@ -2139,6 +2152,7 @@ void WsCpu::Serialize(Serializer& s)
 	SV(_state.CX);
 	SV(_state.DX);
 	SV(_state.Halted);
+	SV(_state.PowerOff);
 	SV(_state.Flags.AuxCarry);
 	SV(_state.Flags.Carry);
 	SV(_state.Flags.Direction);

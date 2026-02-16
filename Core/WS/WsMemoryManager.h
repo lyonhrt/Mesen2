@@ -55,6 +55,8 @@ public:
 
 	void RefreshMappings();
 
+	uint8_t GetUnmappedPort();
+
 	void Map(uint32_t start, uint32_t end, MemoryType type, uint32_t offset, bool readonly);
 	void Unmap(uint32_t start, uint32_t end);
 
@@ -149,6 +151,9 @@ public:
 
 	template<typename T> T DebugReadPort(uint16_t port);
 
+	bool IsPowerOffRequested() { return _state.PowerOffRequested; }
+	bool IsColorEnabled() { return _state.ColorEnabled; }
+
 	bool IsWordBus(uint32_t addr);
 	uint8_t GetWaitStates(uint32_t addr);
 
@@ -157,9 +162,11 @@ public:
 	uint8_t GetActiveIrqs();
 	uint8_t GetIrqVector();
 
+	void OnBeforeBreak();
+
 	__forceinline bool HasPendingIrq()
 	{
-		return (GetActiveIrqs() & _state.EnabledIrqs) != 0;
+		return GetActiveIrqs() != 0;
 	}
 
 	AddressInfo GetAbsoluteAddress(uint32_t relAddr);

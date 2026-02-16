@@ -2667,6 +2667,39 @@
     <ClInclude Include="SMS\SmsBiosMapper.h">
       <Filter>SMS</Filter>
     </ClInclude>
+    <ClInclude Include="SMS\HdPacks\SmsHdPackApi.h">
+      <Filter>SMS\HdPacks</Filter>
+    </ClInclude>
+    <ClInclude Include="SMS\HdPacks\HdPackBuilderSms.h">
+      <Filter>SMS\HdPacks</Filter>
+    </ClInclude>
+    <ClInclude Include="SMS\HdPacks\HdPackConditionsSms.h">
+      <Filter>SMS\HdPacks</Filter>
+    </ClInclude>
+    <ClInclude Include="SMS\HdPacks\HdBuilderSmsVdp.h">
+      <Filter>SMS\HdPacks</Filter>
+    </ClInclude>
+    <ClInclude Include="SMS\HdPacks\HdDataSms.h">
+      <Filter>SMS\HdPacks</Filter>
+    </ClInclude>
+    <ClInclude Include="SMS\HdPacks\SmsHdPack.h">
+      <Filter>SMS\HdPacks</Filter>
+    </ClInclude>
+    <ClInclude Include="SMS\HdPacks\SmsHdVideoFilter.h">
+      <Filter>SMS\HdPacks</Filter>
+    </ClInclude>
+    <ClInclude Include="SMS\HdPacks\SmsHdPackLoader.h">
+      <Filter>SMS\HdPacks</Filter>
+    </ClInclude>
+    <ClInclude Include="SMS\HdPacks\SmsHdTileDumper.h">
+      <Filter>SMS\HdPacks</Filter>
+    </ClInclude>
+    <ClInclude Include="SMS\HdPacks\HdPackDebug.h">
+      <Filter>SMS\HdPacks</Filter>
+    </ClInclude>
+    <ClInclude Include="SMS\HdPacks\HdPackSharedConstantsSms.h">
+      <Filter>SMS\HdPacks</Filter>
+    </ClInclude>
     <ClInclude Include="Shared\ColorUtilities.h">
       <Filter>Shared</Filter>
     </ClInclude>
@@ -2982,17 +3015,9 @@
     <ClInclude Include="GBA\GbaWaitStates.h">
       <Filter>GBA</Filter>
     </ClInclude>
-    <ClInclude Include="SMS\HdPacks\HdPackConditions.h" />
-    <ClInclude Include="SMS\HdPacks\HdPackLoaderSms.h" />
-    <ClInclude Include="SMS\HdPacks\HdPackBuilderSms.h" />
-    <ClInclude Include="SMS\HdPacks\HdDataSms.h" />
-    <ClInclude Include="SMS\HdPacks\HdSmsPack.h" />
-    <ClInclude Include="SMS\HdPacks\HdBuilderSmsVdp.h" />
-    <ClInclude Include="SMS\HdPacks\SmsHdPackApi.h" />
-    <ClInclude Include="Shared\HdPacks\IHdPackSystem.h" />
-    <ClInclude Include="SMS\HdPacks\SmsHdPackSystem.h" />
-    <ClInclude Include="NES\HdPacks\NesHdPackSystem.h" />
-    <ClInclude Include="SMS\HdPacks\SmsHdVideoFilter.h" />
+    <ClInclude Include="SNES\Input\SnesRumbleController.h">
+      <Filter>SNES\Input</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Shared\Video\RotateFilter.cpp">
@@ -3165,6 +3190,27 @@
     </ClCompile>
     <ClCompile Include="SMS\SmsBiosMapper.cpp">
       <Filter>SMS</Filter>
+    </ClCompile>
+    <ClCompile Include="SMS\HdPacks\SmsHdPackApi.cpp">
+      <Filter>SMS\HdPacks</Filter>
+    </ClCompile>
+    <ClCompile Include="SMS\HdPacks\HdPackBuilderSms.cpp">
+      <Filter>SMS\HdPacks</Filter>
+    </ClCompile>
+    <ClCompile Include="SMS\HdPacks\HdBuilderSmsVdp.cpp">
+      <Filter>SMS\HdPacks</Filter>
+    </ClCompile>
+    <ClCompile Include="SMS\HdPacks\SmsHdTileDumper.cpp">
+      <Filter>SMS\HdPacks</Filter>
+    </ClCompile>
+    <ClCompile Include="SMS\HdPacks\HdPackConditionsSms.cpp">
+      <Filter>SMS\HdPacks</Filter>
+    </ClCompile>
+    <ClCompile Include="SMS\HdPacks\SmsHdVideoFilter.cpp">
+      <Filter>SMS\HdPacks</Filter>
+    </ClCompile>
+    <ClCompile Include="SMS\HdPacks\SmsHdPackLoader.cpp">
+      <Filter>SMS\HdPacks</Filter>
     </ClCompile>
     <ClCompile Include="PCE\CdRom\PceAdpcm.cpp">
       <Filter>PCE\CdRom</Filter>
@@ -3355,17 +3401,9 @@
     <ClCompile Include="SNES\Debugger\St018DisUtils.cpp">
       <Filter>SNES\Debugger</Filter>
     </ClCompile>
-    <ClCompile Include="SMS\HdPacks\HdDataSms.cpp" />
-    <ClCompile Include="SMS\HdPacks\HdPackLoaderSms.cpp" />
-    <ClCompile Include="SMS\HdPacks\HdPackBuilderSms.cpp" />
-    <ClCompile Include="SMS\HdPacks\HdSmsPack.cpp" />
-    <ClCompile Include="SMS\HdPacks\HdPackConditions.cpp" />
-    <ClCompile Include="SMS\HdPacks\HdBuilderSmsVdp.cpp" />
-    <ClCompile Include="SMS\HdPacks\SmsHdPackApi.cpp" />
-    <ClCompile Include="Shared\HdPacks\IHdPackSystem.cpp" />
-    <ClCompile Include="SMS\HdPacks\SmsHdPackSystem.cpp" />
-    <ClCompile Include="NES\HdPacks\NesHdPackSystem.cpp" />
-    <ClCompile Include="SMS\HdPacks\SmsHdVideoFilter.cpp" />
+    <ClCompile Include="SNES\Input\SnesRumbleController.cpp">
+      <Filter>SNES\Input</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="PCE">
@@ -3451,6 +3489,9 @@
     </Filter>
     <Filter Include="SMS\Input">
       <UniqueIdentifier>{29ab9afb-6064-4e72-9652-6a0affa636e1}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="SMS\HdPacks">
+      <UniqueIdentifier>{a1b2c3d4-e5f6-7890-abcd-ef1234567890}</UniqueIdentifier>
     </Filter>
     <Filter Include="Shared\Utilities">
       <UniqueIdentifier>{9c5b1b92-fa62-42bf-9102-9cc5d35262b8}</UniqueIdentifier>

@@ -49,7 +49,7 @@ void WsControlManager::UpdateControlDevices()
 
 uint8_t WsControlManager::Read()
 {
-	uint8_t result = 0;
+	uint8_t result = _state.InputSelect;
 
 	for(shared_ptr<BaseControlDevice>& controller : _controlDevices) {
 		if(controller->GetPort() == 0 && controller->GetControllerType() == ControllerType::WsController) {
@@ -97,8 +97,8 @@ void WsControlManager::UpdateInputState()
 	
 	uint8_t newInput = Read();
 	if((_prevInput | newInput) > _prevInput) {
-		//Trigger IRQ whenever any extra bits are set compared to the previous input
-		_console->GetMemoryManager()->SetIrqSource(WsIrqSource::KeyPressed);
+		//Trigger IRQ (on scanline 144) whenever any extra bits are set compared to the previous input
+		_needKeyIrq = true;
 	}
 	_prevInput = newInput;
 
@@ -109,9 +109,18 @@ void WsControlManager::UpdateInputState()
 	_soundButtonPressed = soundButtonPressed;
 }
 
+void WsControlManager::TriggerKeyIrq()
+{
+	if(_needKeyIrq) {
+		_console->GetMemoryManager()->SetIrqSource(WsIrqSource::KeyPressed);
+		_needKeyIrq = false;
+	}
+}
+
 void WsControlManager::Serialize(Serializer& s)
 {
 	SV(_state.InputSelect);
 	SV(_prevInput);
 	SV(_soundButtonPressed);
+	SV(_needKeyIrq);
 }

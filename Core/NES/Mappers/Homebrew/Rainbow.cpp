@@ -429,7 +429,7 @@ uint8_t Rainbow::MapperReadVram(uint16_t addr, MemoryOperationType memoryOperati
 				return ReadChr(fetchAddr);
 			} else {
 				uint32_t fetchAddr = (addr & 0x1FF8) | (windowScanline & 0x07);
-				return ReadChr(fetchAddr);
+				return InternalReadVram(fetchAddr);
 			}
 		} else if(_overrideTileFetch && isBgFetch) {
 			uint32_t fetchAddr = (addr & 0xFFF) | ((_extData & 0x3F) << 12) | (_bgExtModeOffset << 18);
@@ -604,14 +604,14 @@ uint8_t Rainbow::ReadRegister(uint16_t addr)
 			UpdateIrqStatus();
 
 			if(_nmiVectorEnabled) {
-				return (addr & 0x01) ? _nmiVectorAddr : (_nmiVectorAddr >> 8);
+				return (addr & 0x01) ? (_nmiVectorAddr >> 8) : _nmiVectorAddr;
 			}
 			return DebugReadRam(addr);
 
 		case 0xFFFE:
 		case 0xFFFF:
 			if(_irqVectorEnabled) {
-				return (addr & 0x01) ? _irqVectorAddr : (_irqVectorAddr >> 8);
+				return (addr & 0x01) ? (_irqVectorAddr >> 8) : _irqVectorAddr;
 			}
 			return DebugReadRam(addr);
 	}

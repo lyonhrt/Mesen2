@@ -23,7 +23,8 @@ private:
 
 	LinuxGameController(Emulator* emu, int deviceID, int fileDescriptor, libevdev *device);
 	bool CheckAxis(unsigned int code, bool forPositive);
-	void Calibrate();	
+	bool CheckButton(int btn);
+	void Calibrate();
 
 public:
 	~LinuxGameController();
@@ -35,5 +36,5 @@ public:
 	bool IsButtonPressed(int buttonNumber);
 	optional<int16_t> GetAxisPosition(int axis);
 
-	void SetForceFeedback(uint16_t magnitude);
+	void SetForceFeedback(uint16_t rightMagnitude, uint16_t leftMagnitude);
 };

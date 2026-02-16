@@ -8,8 +8,8 @@ using Mesen.Interop;
 using Mesen.Localization;
 using Mesen.Utilities;
 using Mesen.ViewModels;
-using ReactiveUI.Fody.Helpers;
 using System;
+using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Threading.Tasks;
@@ -26,6 +26,7 @@ namespace Mesen.Controls
 		public static readonly StyledProperty<string> SubTitleProperty = AvaloniaProperty.Register<StateGridEntry, string>(nameof(SubTitle));
 		public static readonly StyledProperty<bool> EnabledProperty = AvaloniaProperty.Register<StateGridEntry, bool>(nameof(Enabled));
 		public static readonly StyledProperty<bool> IsActiveEntryProperty = AvaloniaProperty.Register<StateGridEntry, bool>(nameof(IsActiveEntry));
+		public static readonly StyledProperty<double> AspectRatioProperty = AvaloniaProperty.Register<StateGridEntry, double>(nameof(AspectRatio));
 
 		public RecentGameInfo Entry
 		{
@@ -37,6 +38,12 @@ namespace Mesen.Controls
 		{
 			get { return GetValue(ImageProperty); }
 			set { SetValue(ImageProperty, value); }
+		}
+
+		public double AspectRatio
+		{
+			get { return GetValue(AspectRatioProperty); }
+			set { SetValue(AspectRatioProperty, value); }
 		}
 
 		public bool Enabled
@@ -120,6 +127,7 @@ namespace Mesen.Controls
 			if(fileExists) {
 				Task.Run(() => {
 					Bitmap? img = null;
+					double aspectRatio = 0;
 					try {
 						if(Path.GetExtension(game.FileName) == "." + FileDialogHelper.MesenSaveStateExt) {
 							img = EmuApi.GetSaveStatePreview(game.FileName);
@@ -138,12 +146,25 @@ namespace Mesen.Controls
 
 									img = new Bitmap(ms);
 								}
+
+								entry = zip.GetEntry("RomInfo.txt");
+								if(entry != null) {
+									using StreamReader reader = new StreamReader(entry.Open());
+									string? line = null;
+									while((line = reader.ReadLine()) != null) {
+										if(line.StartsWith("aspectratio=")) {
+											double.TryParse(line.Split('=')[1], NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out aspectRatio);
+											break;
+										}
+									}
+								}
 							}
 						}
 					} catch { }
 
 					Dispatcher.UIThread.Post(() => {
 						Image = img ?? StateGridEntry.EmptyImage;
+						AspectRatio = aspectRatio;
 					});
 				});
 			}

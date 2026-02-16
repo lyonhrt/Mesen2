@@ -362,6 +362,7 @@ void Debugger::ProcessIdleCycle()
 	switch(type) {
 		case CpuType::Snes: GetDebugger<type, SnesDebugger>()->ProcessIdleCycle(); break;
 		case CpuType::Sa1: GetDebugger<type, SnesDebugger>()->ProcessIdleCycle(); break;
+		case CpuType::Pce: GetDebugger<type, PceDebugger>()->ProcessIdleCycle(); break;
 	}
 }
 
@@ -465,6 +466,10 @@ void Debugger::ProcessPpuCycle()
 void Debugger::SleepUntilResume(CpuType sourceCpu, BreakSource source, MemoryOperationInfo *operation, int breakpointId)
 {
 	if(_suspendRequestCount) {
+		return;
+	} else if(_executionStopped) {
+		//Prevent re-entry, which can happen when OnBeforeBreak() below is called, which causes the SPC to run and can trigger a pause.
+		//Specifically, this happens when resetting the SNES with the "Break on power/reset" option disabled.
 		return;
 	} else if(_breakRequestCount > 0 && (sourceCpu != _mainCpuType || !_debuggers[(int)sourceCpu].Debugger->AllowChangeProgramCounter)) {
 		//When a break is requested by e.g a debugger call, load/save state, etc. always
@@ -1255,6 +1260,7 @@ template void Debugger::ProcessMemoryAccess<CpuType::Ws, MemoryType::WsCartEepro
 
 template void Debugger::ProcessIdleCycle<CpuType::Snes>();
 template void Debugger::ProcessIdleCycle<CpuType::Sa1>();
+template void Debugger::ProcessIdleCycle<CpuType::Pce>();
 
 template void Debugger::ProcessHaltedCpu<CpuType::Snes>();
 template void Debugger::ProcessHaltedCpu<CpuType::Spc>();
