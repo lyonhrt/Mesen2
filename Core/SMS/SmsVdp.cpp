@@ -1435,6 +1435,42 @@ uint16_t SmsVdp::GetPixelColor()
         info.HasSprite = true;
     }
     
+    // SG-1000 sprite HD pixel info
+    if(!_state.UseMode4 && drawnSpriteIndex >= 0 && pixelIdx >= 0 && pixelIdx < MaxPixelsPerFrame) {
+        SpriteShifter& sprite = _spriteShifters[drawnSpriteIndex];
+        HdPixelInfo& info = _hdPixelInfoWrite[pixelIdx];
+        
+        // SG-1000 sprites: 1bpp pattern, single color
+        // TileData[0] = pattern byte for current row (already shifted)
+        // TileData[1] = sprite color (0-15)
+        uint8_t spriteColor = sprite.TileData[1];
+        
+        // Calculate tile address for full 8-byte pattern
+        uint16_t patternBase = _state.SpritePatternSelector & 0x3800;
+        uint16_t tileIndex = sprite.RawTileIndex;
+        uint16_t tileBaseAddr = patternBase | (tileIndex << 3);
+        
+        // Read 8-byte pattern into TileData[0..7], zero the rest
+        for(int i = 0; i < 8; i++) {
+            info.Sprite.TileData[i] = _videoRam[(tileBaseAddr + i) & 0x3FFF];
+        }
+        for(int i = 8; i < 32; i++) {
+            info.Sprite.TileData[i] = 0;
+        }
+        
+        // SG-1000 sprites use fixed 16-color palette
+        info.Sprite.PaletteColors = spriteColor;  // Single color index
+        info.Sprite.TileX = drawnSpriteHdIdx;
+        info.Sprite.TileY = sprite.SpriteRow & 0x07;
+        info.Sprite.HMirror = false;
+        info.Sprite.VMirror = false;
+        info.Sprite.HasTileData = true;
+        info.Sprite.ColorIndex = spriteColor;
+        info.Sprite.PaletteIndex = 0;
+        info.Sprite.IsSg1000Mode = true;  // SG-1000 mode
+        info.HasSprite = true;
+    }
+    
 	if(!spriteDrawn || (highPriority && color != 0) || _disableSprites) {
         // Store BG color index for fallback rendering in HD video filter
         if(pixelIdx >= 0 && pixelIdx < MaxPixelsPerFrame) {
