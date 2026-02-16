@@ -595,8 +595,8 @@ void SmsVdp::LoadBgTilesSg()
 			}
 			
 			// SG-1000 HD pack: Store tile info for video filter
-			// Store 8-byte pattern in first 8 bytes of TileData, color byte in PaletteColors
-			// Must match HdBuilderSmsVdp::LoadBgTilesSg pattern address calculation exactly
+			// Store 8-byte pattern in first 8 bytes of TileData, color hash in PaletteColors
+			// Must match HdBuilderSmsVdp::LoadBgTilesSg pattern address and color hash calculation exactly
 			if(!_disableBackground) {
 				// Calculate base pattern address (without row offset) to match dumping
 				uint16_t patternAddr;
@@ -620,7 +620,25 @@ void SmsVdp::LoadBgTilesSg()
 				for(int i = 8; i < 32; i++) {
 					_hdBgTileCur.TileData[i] = 0;
 				}
-				_hdBgTileCur.PaletteColors = color;
+				
+				// Compute color hash of all 8 row colors to match HdBuilderSmsVdp::LoadBgTilesSg
+				// This is required for proper hash matching at render time
+				uint32_t colorHash = 0;
+				for(int row = 0; row < 8; row++) {
+					uint8_t rowColor = 0;
+					if(_state.M3_Use240LineMode) {
+						rowColor = _videoRam[(patternAddr + row) & 0x3FFF];
+					} else if(_state.M2_AllowHeightChange) {
+						uint16_t colorMask = ((_state.ColorTableAddress >> 3) | 0x07) & 0x3FF;
+						uint16_t colorAddr = (_state.ColorTableAddress & 0x2000) | ((_bgTileIndex & colorMask) << 3) + row;
+						rowColor = _videoRam[colorAddr & 0x3FFF];
+					} else {
+						uint16_t colorAddr = (_state.ColorTableAddress & 0x3FC0) | ((_bgTileIndex >> 3) & 0x1F);
+						rowColor = _videoRam[colorAddr & 0x3FFF];
+					}
+					colorHash = (colorHash * 31) + rowColor;
+				}
+				_hdBgTileCur.PaletteColors = colorHash;
 				_hdBgTileCur.PaletteIndex = 0;
 				_hdBgTileCur.HMirror = false;
 				_hdBgTileCur.VMirror = false;
