@@ -314,21 +314,9 @@ private:
 
 		// Step 1: Draw BG tile (if present)
 		if(pixelInfo->Bg.HasTileData) {
-			// Blank tile fast path: tiles with all-zero pattern data are always solid palette color 0.
-			// Skip hash lookup entirely — blank tiles appear with many different palettes
-			// and we can't capture every variation. The VDP color is always correct.
-			// For SG-1000: only check TileData[0..7] (pattern), not [8..15] (color metadata)
-			// For SMS/GG: check all 32 bytes (4 bitplanes × 8 rows)
-			int patternBytes = pixelInfo->Bg.IsSg1000Mode ? 8 : 32;
-			bool isBlankTile = true;
-			for(int i = 0; i < patternBytes; i++) {
-				if(pixelInfo->Bg.TileData[i] != 0) { isBlankTile = false; break; }
-			}
-
-			if(!isBlankTile) {
-				// For SG-1000 tiles, use PaletteColors (color byte with FG/BG colors)
-				// For SMS/GG tiles, use PaletteIndex (0 or 1)
-				uint8_t bgPalGroup = pixelInfo->Bg.IsSg1000Mode ? (uint8_t)(pixelInfo->Bg.PaletteColors & 0xFF) : pixelInfo->Bg.PaletteIndex;
+			// For SG-1000 tiles, use PaletteColors (color byte with FG/BG colors)
+			// For SMS/GG tiles, use PaletteIndex (0 or 1)
+			uint8_t bgPalGroup = pixelInfo->Bg.IsSg1000Mode ? (uint8_t)(pixelInfo->Bg.PaletteColors & 0xFF) : pixelInfo->Bg.PaletteIndex;
 				
 				int imgIndex = -1;
 				uint16_t srcX = 0, srcY = 0;
@@ -440,12 +428,6 @@ private:
 						DrawColor(color, outputBuffer, screenWidth);
 					}
 				}
-			} else {
-				// Blank tile: render VDP color directly (palette color 0 for this tile's palette)
-				uint8_t colorIndex = pixelInfo->Bg.ColorIndex;
-				uint32_t color = (colorIndex < 32) ? _palette[colorIndex] : _palette[0];
-				DrawColor(color, outputBuffer, screenWidth);
-			}
 		}
 
 		// Step 2: Draw sprite on top (if present)

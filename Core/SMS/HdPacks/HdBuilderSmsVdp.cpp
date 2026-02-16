@@ -662,15 +662,9 @@ void HdBuilderSmsVdp::ScanVramTiles()
     auto pushTile = [&](uint16_t tileIndex, uint8_t paletteIdx, bool isSprite) {
         uint16_t baseTileAddr = (tileIndex * 32) & 0x3FFF;
 
-        // Skip completely empty tiles (all zero pattern data)
-        bool allZero = true;
-        for(int i = 0; i < 32; i++) {
-            if(_videoRam[(baseTileAddr + i) & 0x3FFF] != 0) {
-                allZero = false;
-                break;
-            }
-        }
-        if(allZero) return;
+        // Note: We capture ALL tiles including blank/solid color tiles.
+        // Blank tiles with all-zero pattern data render as solid palette color 0,
+        // and must be captured for proper HD replacement.
 
         HdSmsTileInfo tile;
         tile.Reset();
