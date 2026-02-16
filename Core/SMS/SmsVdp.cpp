@@ -1153,6 +1153,7 @@ void SmsVdp::LoadSpriteTilesSg()
 				sprTileIndex &= ~0x03;
 			}
 
+			_spriteShifters[_spriteIndex].RawTileIndex = sprTileIndex;  // Store for HD pack lookup
 			_spriteShifters[_spriteIndex].TileAddr = _state.SpritePatternSelector | (sprTileIndex << 3) | _spriteShifters[_spriteIndex].SpriteRow;
 			break;
 		}

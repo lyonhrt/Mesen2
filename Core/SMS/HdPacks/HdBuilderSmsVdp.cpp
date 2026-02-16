@@ -566,13 +566,16 @@ void HdBuilderSmsVdp::LoadSpriteTilesSg()
     spriteTile.PaletteIndex = 1; // Sprites use "high" palette conceptually
     spriteTile.IsSg1000Mode = true; // Mark as SG-1000 sprite
     
-    // Get sprite tile address from shifter
-    uint16_t tileAddr = _spriteShifters[sprIndex].TileAddr;
+    // Calculate base pattern address (without row offset) for proper hash matching
+    // TileAddr includes row offset, but we need the base address for all 8 rows
+    uint16_t patternBase = _state.SpritePatternSelector & 0x3800;
+    uint16_t tileIndex = _spriteShifters[sprIndex].RawTileIndex;
+    uint16_t tileBaseAddr = patternBase | (tileIndex << 3);
     
     // SG-1000 sprites are 8 bytes (or 32 bytes for 16x16)
-    // Read the pattern data
+    // Read the full 8-byte pattern (all rows)
     for(int i = 0; i < 8; i++) {
-        spriteTile.TileData[i] = _videoRam[(tileAddr + i) & 0x3FFF];
+        spriteTile.TileData[i] = _videoRam[(tileBaseAddr + i) & 0x3FFF];
     }
     // Zero remaining bytes
     for(int i = 8; i < 32; i++) {
@@ -583,8 +586,8 @@ void HdBuilderSmsVdp::LoadSpriteTilesSg()
     // The color is in the low 4 bits
     uint8_t spriteColor = _spriteShifters[sprIndex].TileData[1] & 0x0F;
     spriteTile.PaletteColors = spriteColor;
-    spriteTile.TileAddr = tileAddr;
-    spriteTile.TileIndex = (int32_t)(tileAddr / 8);
+    spriteTile.TileAddr = tileBaseAddr;
+    spriteTile.TileIndex = (int32_t)tileIndex;
     
     // Capture SG-1000 sprite palette (single color)
     CaptureSgSpritePalette(spriteTile.CapturedPalette, spriteColor);
