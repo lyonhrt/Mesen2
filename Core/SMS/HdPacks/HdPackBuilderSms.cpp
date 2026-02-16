@@ -354,6 +354,7 @@ void HdPackBuilderSms::ProcessTileNesStyle(HdTileKeySms& key, uint32_t tileAddr,
         hdTile->DefaultTile = false;
         hdTile->Brightness = 255;
         hdTile->IsSprite = isSprite;
+        hdTile->IsSg1000Mode = key.IsSg1000Mode;  // Critical: copy SG-1000 mode flag for correct tile generation
         hdTile->PaletteIndex = key.PaletteIndex;
         hdTile->VramBankId = GetVramBankId(tileAddr);
         hdTile->TransparencyRequired = transparencyRequired;
