@@ -107,14 +107,15 @@ HdScreenInfoSms* HdBuilderSmsVdp::SwapBuffersOnFrameEnd()
         return nullptr;
     }
 
-    // VRAM scan: capture all tiles in VRAM to ensure tiles that aren't currently
-    // visible on screen are still captured (e.g., tiles loaded for upcoming frames).
-    // SMS/GG uses ScanVramTiles(), SG-1000 uses ScanVramTilesSg().
-    if(_state.UseMode4) {
-        ScanVramTiles();
-    } else {
-        ScanVramTilesSg();
-    }
+    // VRAM scan disabled for now - it captures tiles with potentially wrong palette colors
+    // because the color table address calculation differs between VRAM scan and actual rendering.
+    // Per-pixel capture during DrawPixel() handles all visible tiles correctly.
+    // TODO: Fix VRAM scan to use correct color addresses for each tile
+    // if(_state.UseMode4) {
+    //     ScanVramTiles();
+    // } else {
+    //     ScanVramTilesSg();
+    // }
 
     // Count pixels with data in the buffer we're about to swap out (the one that was being written to)
     static int swapCount = 0;
