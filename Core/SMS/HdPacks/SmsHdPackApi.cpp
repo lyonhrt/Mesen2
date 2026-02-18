@@ -86,18 +86,19 @@ namespace SmsHdPackApi {
 
     static inline uint64_t ComputeCanonicalHash(const uint8_t* tileData32, bool isSprite, uint8_t /*palGroup*/, uint32_t paletteColors = 0)
     {
-        // Matches HdPackBuilderSms::GetCanonicalHash: FNV-1a over 32 bytes, then PaletteColors (4 bytes), then sprite flag
-        // PaletteColors encodes the first 4 palette entries and is available at both capture and render time
+        // Simplified hash: pattern data + sprite flag only
+        // PaletteColors is NOT included in the hash because:
+        // 1. SG-1000 has complex per-row colors that are hard to match between capture/render
+        // 2. SMS/GG palette RAM changes at runtime causing hash misses
+        // 3. The palette is stored separately and used for rendering, not identification
+        // This means tiles with same pattern but different palettes will share HD replacement.
+        (void)paletteColors; // Unused - palette not part of hash
+        
         const uint64_t FNV_OFFSET = 1469598103934665603ULL;
         const uint64_t FNV_PRIME  = 1099511628211ULL;
         uint64_t h = FNV_OFFSET;
         for(int i = 0; i < 32; i++) {
             h ^= (uint64_t)tileData32[i];
-            h *= FNV_PRIME;
-        }
-        // Hash PaletteColors byte-by-byte (must match builder's GetCanonicalHash)
-        for(int i = 0; i < 4; i++) {
-            h ^= (uint64_t)((paletteColors >> (i*8)) & 0xFF);
             h *= FNV_PRIME;
         }
         h ^= (uint64_t)(isSprite ? 1 : 0); h *= FNV_PRIME;

@@ -3452,7 +3452,8 @@ uint32_t HdPackBuilderSms::GetTileVisualHash(const HdPackTileInfoSms* tile) cons
     return hash;
 }
 
-// Canonical identity hash for tiles: pattern data + palette selection (0/1 for BG, 1 for sprites) + sprite flag
+// Canonical identity hash for tiles: pattern data + sprite flag only
+// PaletteColors is NOT included to ensure hash matches between capture and render
 // Uses FNV-1a 64-bit for stability across runs/platforms
 uint64_t HdPackBuilderSms::GetCanonicalHash(const HdTileKeySms& key) const
 {
@@ -3474,12 +3475,8 @@ uint64_t HdPackBuilderSms::GetCanonicalHash(const HdTileKeySms& key) const
         }
     }
 
-    // Include PaletteColors (packed 4 palette entries) to distinguish palette variations
-    // This must match SmsHdPackApi::ComputeCanonicalHash and HdTileKeySms::operator==
-    for(int i = 0; i < 4; i++) {
-        h ^= (uint64_t)((key.PaletteColors >> (i*8)) & 0xFF);
-        h *= FNV_PRIME;
-    }
+    // PaletteColors NOT included in hash - stored separately for rendering
+    // This ensures hash matches between capture and render regardless of palette state
 
     // Sprite/background flag
     h ^= (uint64_t)(key.IsSprite ? 1 : 0);
@@ -3501,12 +3498,7 @@ uint64_t HdPackBuilderSms::GetCanonicalHash(const HdPackTileInfoSms* tile) const
         h *= FNV_PRIME;
     }
 
-    // Include PaletteColors (packed 4 palette entries) to distinguish palette variations
-    // This must match SmsHdPackApi::ComputeCanonicalHash and HdTileKeySms::operator==
-    for(int i = 0; i < 4; i++) {
-        h ^= (uint64_t)((tile->PaletteColors >> (i*8)) & 0xFF);
-        h *= FNV_PRIME;
-    }
+    // PaletteColors NOT included in hash - stored separately for rendering
 
     // Sprite/background flag
     h ^= (uint64_t)(tile->IsSprite ? 1 : 0);
