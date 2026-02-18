@@ -418,6 +418,27 @@ namespace SmsHdPackApi {
     {
         if(!IsHdReplacementEnabled() || !tileData32) return false;
         
+        // Check if this is an SG-1000 tile (bytes 8-31 are zero for 8-byte 1bpp tiles)
+        bool isSg1000Tile = true;
+        for(int i = 8; i < 32; i++) {
+            if(tileData32[i] != 0) { isSg1000Tile = false; break; }
+        }
+        
+        // For SG-1000 tiles, try pattern-only lookup first (palette varies by row bank)
+        if(isSg1000Tile) {
+            uint64_t patHash = ComputePatternOnlyHash(tileData32, isSprite);
+            auto patIt = g_hdPatternMap.find(patHash);
+            if(patIt != g_hdPatternMap.end()) {
+                const HdEntry& e = patIt->second;
+                imgIndex = e.ImgIndex;
+                srcX = e.X;
+                srcY = e.Y;
+                scale = g_hdPackScale;
+                return true;
+            }
+        }
+        
+        // Try exact hash match (pattern + palette)
         uint64_t h = ComputeCanonicalHash(tileData32, isSprite, palGroup, paletteColors);
         auto it = g_hdHashMap.find(h);
         if(it != g_hdHashMap.end()) {
