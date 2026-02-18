@@ -1753,14 +1753,29 @@ void HdPackBuilderSms::GenerateHdTile(HdPackTileInfoSms* tile) {
         }
         
         // Helper: convert SG-1000 color index (0-15) to 32-bit ARGB
-        const uint16_t* sgPalette = _vdp ? _vdp->GetSmsSgPalette() : nullptr;
-        auto sgToArgb = [sgPalette](uint8_t colorIdx) -> uint32_t {
-            if(!sgPalette || colorIdx >= 16) return 0xFF000000;
-            uint16_t pal = sgPalette[colorIdx];
-            uint8_t r = ((pal >> 0) & 0x1F) << 3;
-            uint8_t g = ((pal >> 5) & 0x1F) << 3;
-            uint8_t b = ((pal >> 10) & 0x1F) << 3;
-            return 0xFF000000 | (r << 16) | (g << 8) | b;
+        // SG-1000/TMS9918 uses a fixed 16-color palette - hardcode it to avoid null VDP issues
+        // Standard TMS9918 palette (RGB values)
+        static const uint32_t sg1000Palette[16] = {
+            0x00000000,  // 0: Transparent
+            0xFF000000,  // 1: Black
+            0xFF21C842,  // 2: Medium Green
+            0xFF5EDC78,  // 3: Light Green
+            0xFF5455ED,  // 4: Dark Blue
+            0xFF7D76FC,  // 5: Light Blue
+            0xFFD4524D,  // 6: Dark Red
+            0xFF42EBF5,  // 7: Cyan
+            0xFFFC5554,  // 8: Medium Red
+            0xFFFF7978,  // 9: Light Red
+            0xFFD4C154,  // 10: Dark Yellow
+            0xFFE6CE80,  // 11: Light Yellow
+            0xFF21B03B,  // 12: Dark Green
+            0xFFC95BBA,  // 13: Magenta
+            0xFFCCCCCC,  // 14: Gray
+            0xFFFFFFFF   // 15: White
+        };
+        auto sgToArgb = [](uint8_t colorIdx) -> uint32_t {
+            if(colorIdx >= 16) return 0xFF000000;
+            return sg1000Palette[colorIdx];
         };
         
         if(tile->IsSprite) {
