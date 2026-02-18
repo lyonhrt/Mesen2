@@ -30,6 +30,7 @@ public:
     // Runs at frame end to ensure animated/transitional tiles aren't missed
     void ScanVramTiles();
     void ScanVramTilesSg();
+    void ScanNametableTilesSg();  // Scan nametable for correct color table lookups
 
 private:
     bool _hdCaptureEnabled = false;

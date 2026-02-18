@@ -107,15 +107,15 @@ HdScreenInfoSms* HdBuilderSmsVdp::SwapBuffersOnFrameEnd()
         return nullptr;
     }
 
-    // VRAM scan disabled for now - it captures tiles with potentially wrong palette colors
-    // because the color table address calculation differs between VRAM scan and actual rendering.
-    // Per-pixel capture during DrawPixel() handles all visible tiles correctly.
-    // TODO: Fix VRAM scan to use correct color addresses for each tile
-    // if(_state.UseMode4) {
-    //     ScanVramTiles();
-    // } else {
-    //     ScanVramTilesSg();
-    // }
+    // VRAM scan: capture all tiles in VRAM to ensure tiles that aren't currently
+    // visible on screen are still captured (e.g., tiles loaded for upcoming frames).
+    // For SG-1000, we scan the nametable to get the actual tile indices used,
+    // which ensures correct color table lookups.
+    if(_state.UseMode4) {
+        ScanVramTiles();
+    } else {
+        ScanNametableTilesSg();
+    }
 
     // Count pixels with data in the buffer we're about to swap out (the one that was being written to)
     static int swapCount = 0;
@@ -833,5 +833,134 @@ void HdBuilderSmsVdp::ScanVramTilesSg()
     // Scan sprite tiles (256 patterns max)
     for(int tileIndex = 0; tileIndex < 256; tileIndex++) {
         captureTile((uint16_t)tileIndex, true);
+    }
+}
+
+void HdBuilderSmsVdp::ScanNametableTilesSg()
+{
+    if(!_hdCaptureEnabled || !_captureBuffer || _state.UseMode4) {
+        return; // Only for SG-1000/TMS9918 modes (not Mode 4)
+    }
+    
+    // Skip text mode for now
+    if(_state.M1_Use224LineMode) {
+        return;
+    }
+    
+    // SG-1000 nametable: 32x24 = 768 entries, each entry is 1 byte (tile index)
+    // In Mode 2, each third of the screen (8 rows) uses a different pattern/color bank
+    uint16_t ntBase = _state.NametableAddress & 0x3C00;
+    
+    // Scan all 768 nametable entries (32 columns x 24 rows)
+    for(int row = 0; row < 24; row++) {
+        // In Mode 2, row determines which bank (0-2) for pattern/color lookup
+        uint16_t rowBank = _state.M2_AllowHeightChange ? (row / 8) * 256 : 0;
+        
+        for(int col = 0; col < 32; col++) {
+            uint16_t ntAddr = ntBase + (row * 32 + col);
+            uint8_t tileIndex = _videoRam[ntAddr & 0x3FFF];
+            
+            // Combine with row bank for Mode 2
+            uint16_t fullTileIndex = rowBank + tileIndex;
+            
+            HdSmsTileInfo tile;
+            tile.Reset();
+            tile.TileIndex = (int32_t)fullTileIndex;
+            tile.IsSprite = false;
+            tile.IsVramTile = true;
+            tile.IsSg1000Mode = true;
+            tile.PaletteIndex = 0;
+            
+            // Calculate pattern address (same as LoadBgTilesSg)
+            uint16_t patternAddr;
+            if(_state.M3_Use240LineMode) {
+                patternAddr = (_state.BgPatternTableAddress & 0x3800) + (fullTileIndex * 8);
+            } else if(_state.M2_AllowHeightChange) {
+                uint16_t mask = ((_state.BgPatternTableAddress >> 3) | 0xFF) & 0x3FF;
+                patternAddr = (_state.BgPatternTableAddress & 0x2000) | ((fullTileIndex & mask) * 8);
+            } else {
+                patternAddr = (_state.BgPatternTableAddress & 0x3800) + (fullTileIndex * 8);
+            }
+            
+            // Read 8-byte pattern
+            for(int i = 0; i < 8; i++) {
+                tile.TileData[i] = _videoRam[(patternAddr + i) & 0x3FFF];
+            }
+            for(int i = 8; i < 32; i++) {
+                tile.TileData[i] = 0;
+            }
+            
+            // Read color data using same logic as LoadBgTilesSg
+            tile.CapturedPalette.Reset();
+            tile.CapturedPalette.EntryCount = 8;
+            tile.CapturedPalette.BytesPerEntry = 1;
+            tile.CapturedPalette.Format = SmsHdPackSharedConstants::PaletteFormat::Sg1000;
+            
+            uint32_t colorHash = 0;
+            for(int r = 0; r < 8; r++) {
+                uint8_t colorByte = 0;
+                if(_state.M3_Use240LineMode) {
+                    colorByte = _videoRam[(patternAddr + r) & 0x3FFF];
+                } else if(_state.M2_AllowHeightChange) {
+                    uint16_t colorMask = ((_state.ColorTableAddress >> 3) | 0x07) & 0x3FF;
+                    uint16_t colorAddr = (_state.ColorTableAddress & 0x2000) | ((fullTileIndex & colorMask) << 3) + r;
+                    colorByte = _videoRam[colorAddr & 0x3FFF];
+                } else {
+                    uint16_t colorAddr = (_state.ColorTableAddress & 0x3FC0) | ((fullTileIndex >> 3) & 0x1F);
+                    colorByte = _videoRam[colorAddr & 0x3FFF];
+                }
+                tile.CapturedPalette.Data[r] = colorByte;
+                colorHash = (colorHash * 31) + colorByte;
+            }
+            
+            tile.PaletteColors = colorHash;
+            tile.TileAddr = patternAddr;
+            
+            _captureBuffer->ExtraBgTiles.push_back(tile);
+        }
+    }
+    
+    // Scan sprite table to capture sprite tiles with correct colors
+    uint16_t satBase = _state.SpriteTableAddress & 0x3F80;
+    uint16_t sprPatternBase = _state.SpritePatternSelector & 0x3800;
+    
+    for(int sprIdx = 0; sprIdx < 32; sprIdx++) {
+        uint8_t sprY = _videoRam[(satBase + sprIdx) & 0x3FFF];
+        if(sprY == 0xD0) break; // End of sprite list
+        
+        uint16_t attrAddr = satBase + 0x80 + (sprIdx * 2);
+        uint8_t sprX = _videoRam[attrAddr & 0x3FFF];
+        uint8_t sprAttr = _videoRam[(attrAddr + 1) & 0x3FFF];
+        uint8_t sprTileIndex = sprAttr & (_state.UseLargeSprites ? 0xFC : 0xFF);
+        uint8_t sprColor = _videoRam[(satBase + 0x80 + sprIdx * 2 + 3) & 0x3FFF] & 0x0F;
+        
+        // Capture sprite tile
+        HdSmsTileInfo tile;
+        tile.Reset();
+        tile.TileIndex = (int32_t)sprTileIndex;
+        tile.IsSprite = true;
+        tile.IsVramTile = true;
+        tile.IsSg1000Mode = true;
+        tile.PaletteIndex = 1;
+        
+        uint16_t patternAddr = sprPatternBase | (sprTileIndex << 3);
+        
+        for(int i = 0; i < 8; i++) {
+            tile.TileData[i] = _videoRam[(patternAddr + i) & 0x3FFF];
+        }
+        for(int i = 8; i < 32; i++) {
+            tile.TileData[i] = 0;
+        }
+        
+        // Sprite color is single value
+        tile.CapturedPalette.Reset();
+        tile.CapturedPalette.EntryCount = 1;
+        tile.CapturedPalette.BytesPerEntry = 1;
+        tile.CapturedPalette.Format = SmsHdPackSharedConstants::PaletteFormat::Sg1000;
+        tile.CapturedPalette.Data[0] = sprColor;
+        tile.PaletteColors = sprColor;
+        tile.TileAddr = patternAddr;
+        
+        _captureBuffer->ExtraSpriteTiles.push_back(tile);
     }
 }
