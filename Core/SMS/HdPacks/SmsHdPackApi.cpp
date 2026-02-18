@@ -317,9 +317,14 @@ namespace SmsHdPackApi {
                     uint64_t h = ComputeCanonicalHash(pattern.data(), isSpr, palGroup, paletteColors);
                     g_hdHashMap[h] = entry;
 
-                    // Build pattern-only fallback map for fade support
-                    // Only store the first (base) tile per pattern — tiles with ApplyFade=Y
-                    if(entry.ApplyFade) {
+                    // Build pattern-only fallback map for fade support and SG-1000 lookup
+                    // Store the first (base) tile per pattern for fade fallback
+                    // SG-1000 tiles (bytes 8-31 zero) always go in pattern map for row bank handling
+                    bool isSg1000Pattern = true;
+                    for(int pi = 8; pi < 32; pi++) {
+                        if(pattern[pi] != 0) { isSg1000Pattern = false; break; }
+                    }
+                    if(entry.ApplyFade || isSg1000Pattern) {
                         uint64_t patHash = ComputePatternOnlyHash(pattern.data(), isSpr);
                         if(g_hdPatternMap.find(patHash) == g_hdPatternMap.end()) {
                             g_hdPatternMap[patHash] = entry;
