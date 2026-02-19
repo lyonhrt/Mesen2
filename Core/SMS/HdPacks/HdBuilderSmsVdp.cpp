@@ -437,6 +437,33 @@ void HdBuilderSmsVdp::ProcessEndOfScanline()
     }
 }
 
+void HdBuilderSmsVdp::ExecForcedBlank()
+{
+    // During forced blank (RenderingEnabled=false), the parent calls DrawPixel() for visible
+    // scanlines but never calls LoadBgTilesSms/Sg. This means _currentBgTile is stale/empty
+    // and tiles displayed during screen-blank periods (GG SEGA logo, fade transitions, etc.)
+    // are never captured pixel-by-pixel.
+    //
+    // Fix: call LoadBgTilesSms/Sg at the same cycle positions as the normal rendering path
+    // (cycles 0-255 on visible scanlines) so _currentBgTile is populated before DrawPixel runs.
+    // The parent's ExecForcedBlank calls DrawPixel at cycles >= SmsVdpLeftBorder, so loading
+    // at cycles 0-255 is always before the draw — correct ordering.
+
+    uint16_t cyc = _state.Cycle;
+
+    if(_hdCaptureEnabled && _captureBuffer &&
+       cyc < 256 && _state.Scanline < _state.VisibleScanlineCount) {
+        if(_state.UseMode4) {
+            LoadBgTilesSms();
+        } else {
+            LoadBgTilesSg();
+        }
+    }
+
+    // Call parent (handles sprite eval, VRAM access, DrawPixel, ProcessEndOfScanline, etc.)
+    SmsVdp::ExecForcedBlank();
+}
+
 // SG-1000 / TMS9918 Mode Capture Support
 // ============================================================================
 
@@ -829,11 +856,9 @@ void HdBuilderSmsVdp::ScanVramTilesSg()
     for(int tileIndex = 0; tileIndex < maxTiles; tileIndex++) {
         captureTile((uint16_t)tileIndex, false);
     }
-    
-    // Scan sprite tiles (256 patterns max)
-    for(int tileIndex = 0; tileIndex < 256; tileIndex++) {
-        captureTile((uint16_t)tileIndex, true);
-    }
+    // Note: sprite tiles are NOT scanned here because we don't know the sprite color
+    // without reading the SAT. ScanNametableTilesSg() handles sprites with correct
+    // colors from the sprite attribute table.
 }
 
 void HdBuilderSmsVdp::ScanNametableTilesSg()

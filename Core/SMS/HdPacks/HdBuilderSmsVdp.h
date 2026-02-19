@@ -21,6 +21,7 @@ public:
     void LoadBgTilesSms() override;
     void LoadSpriteTilesSms() override;
     void ProcessEndOfScanline() override;
+    void ExecForcedBlank() override;
     
     // Override for SG-1000 capture support (TMS9918 modes)
     void LoadBgTilesSg() override;

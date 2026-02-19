@@ -220,7 +220,7 @@ protected:
 	uint8_t ReverseBitOrder(uint8_t val);
 	
 	__forceinline void Exec();
-	__forceinline void ExecForcedBlank();
+	virtual void ExecForcedBlank();
 	__forceinline void ProcessForcedBlankVblank();
 
 	int GetVisiblePixelIndex();

@@ -143,15 +143,37 @@ void HdPackBuilderSms::ProcessFrame(HdScreenInfoSms* frameInfo)
         }
     }
 
+    // Build pattern-only sets from pixel-captured tiles so we can detect
+    // VRAM-scan tiles whose pattern was already seen with correct palette.
+    // A pattern is keyed on TileData[32] + IsSprite (no palette).
+    auto makePatternKey = [](const HdTileKeySms& k) -> std::pair<std::array<uint8_t,32>, bool> {
+        std::array<uint8_t,32> arr;
+        memcpy(arr.data(), k.TileData, 32);
+        return { arr, k.IsSprite };
+    };
+    std::set<std::pair<std::array<uint8_t,32>, bool>> pixelCapturedPatterns;
+    for(const auto& k : bgProcessed) {
+        pixelCapturedPatterns.insert(makePatternKey(k));
+    }
+    for(const auto& k : spriteProcessed) {
+        pixelCapturedPatterns.insert(makePatternKey(k));
+    }
+
     // Process extra tiles from VRAM scan (nametable + sprite table walk)
     // These ensure tiles from animated sequences/transitions are captured
-    // even if pixel-by-pixel capture missed them
+    // even if pixel-by-pixel capture missed them.
+    // For tiles whose pattern was already captured pixel-by-pixel (with correct palette),
+    // skip them entirely — the pixel-captured version is authoritative.
     uint32_t extraBgAdded = 0, extraSprAdded = 0;
     for(const HdSmsTileInfo& bgInfo : frameInfo->ExtraBgTiles) {
         if(bgInfo.TileIndex < 0) continue;
         HdTileKeySms key = static_cast<const HdTileKeySms&>(bgInfo);
         key.IsSprite = false;
         key.IsVramTile = true;
+        // Skip if this pattern was already captured pixel-by-pixel with correct palette
+        if(pixelCapturedPatterns.count(makePatternKey(key))) continue;
+        // Keep actual PaletteColors from ScanVramTiles so the hash matches at render time.
+        // SG-1000 tiles use a color hash (not CRAM bytes) so they also benefit from keeping it.
         if(bgProcessed.insert(key).second) {
             ProcessTileNesStyle(key, bgInfo.TileAddr, false);
             extraBgAdded++;
@@ -162,6 +184,9 @@ void HdPackBuilderSms::ProcessFrame(HdScreenInfoSms* frameInfo)
         HdTileKeySms key = static_cast<const HdTileKeySms&>(sprInfo);
         key.IsSprite = true;
         key.IsVramTile = true;
+        // Skip if this pattern was already captured pixel-by-pixel with correct palette
+        if(pixelCapturedPatterns.count(makePatternKey(key))) continue;
+        // Keep actual PaletteColors from ScanVramTiles so the hash matches at render time.
         if(spriteProcessed.insert(key).second) {
             ProcessTileNesStyle(key, sprInfo.TileAddr, true);
             extraSprAdded++;

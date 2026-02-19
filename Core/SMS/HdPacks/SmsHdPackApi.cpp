@@ -423,27 +423,9 @@ namespace SmsHdPackApi {
     {
         if(!IsHdReplacementEnabled() || !tileData32) return false;
         
-        // Check if this is an SG-1000 tile (bytes 8-31 are zero for 8-byte 1bpp tiles)
-        bool isSg1000Tile = true;
-        for(int i = 8; i < 32; i++) {
-            if(tileData32[i] != 0) { isSg1000Tile = false; break; }
-        }
-        
-        // For SG-1000 tiles, try pattern-only lookup first (palette varies by row bank)
-        if(isSg1000Tile) {
-            uint64_t patHash = ComputePatternOnlyHash(tileData32, isSprite);
-            auto patIt = g_hdPatternMap.find(patHash);
-            if(patIt != g_hdPatternMap.end()) {
-                const HdEntry& e = patIt->second;
-                imgIndex = e.ImgIndex;
-                srcX = e.X;
-                srcY = e.Y;
-                scale = g_hdPackScale;
-                return true;
-            }
-        }
-        
-        // Try exact hash match (pattern + palette)
+        // Try exact hash match (pattern + palette) first.
+        // This correctly distinguishes tiles with same pattern but different colors
+        // (e.g. SG-1000 solid black vs solid red, or SMS tiles with different palettes).
         uint64_t h = ComputeCanonicalHash(tileData32, isSprite, palGroup, paletteColors);
         auto it = g_hdHashMap.find(h);
         if(it != g_hdHashMap.end()) {
@@ -459,18 +441,36 @@ namespace SmsHdPackApi {
         // Only accept if the current palette is a proportionally dimmer version of the base palette.
         // Reject if brightness is >= base (not a fade) or ratio is too low (completely different palette).
         if(!g_hdPatternMap.empty()) {
+            // Detect SG-1000 tiles: bytes 8-31 are all zero (8-byte 1bpp format)
+            bool isSg1000Tile = true;
+            for(int i = 8; i < 32; i++) {
+                if(tileData32[i] != 0) { isSg1000Tile = false; break; }
+            }
+
             uint64_t patHash = ComputePatternOnlyHash(tileData32, isSprite);
             auto patIt = g_hdPatternMap.find(patHash);
-            if(patIt != g_hdPatternMap.end() && patIt->second.ApplyFade) {
-                uint8_t fadeBright = ComputeFadeBrightness(paletteColors, patIt->second.BasePaletteColors);
-                // Accept only if actually dimmer (fadeBright < 255) and not a wildly different palette (>= 25)
-                if(fadeBright < 255 && fadeBright >= 25) {
+            if(patIt != g_hdPatternMap.end()) {
+                if(isSg1000Tile) {
+                    // SG-1000: accept pattern match unconditionally.
+                    // Color hash in PaletteColors may differ between dump and render
+                    // due to row bank variations in Mode 2, so ignore palette here.
                     const HdEntry& e = patIt->second;
                     imgIndex = e.ImgIndex;
                     srcX = e.X;
                     srcY = e.Y;
                     scale = g_hdPackScale;
                     return true;
+                } else if(patIt->second.ApplyFade) {
+                    uint8_t fadeBright = ComputeFadeBrightness(paletteColors, patIt->second.BasePaletteColors);
+                    // Accept only if actually dimmer (fadeBright < 255) and not a wildly different palette (>= 25)
+                    if(fadeBright < 255 && fadeBright >= 25) {
+                        const HdEntry& e = patIt->second;
+                        imgIndex = e.ImgIndex;
+                        srcX = e.X;
+                        srcY = e.Y;
+                        scale = g_hdPackScale;
+                        return true;
+                    }
                 }
             }
         }
