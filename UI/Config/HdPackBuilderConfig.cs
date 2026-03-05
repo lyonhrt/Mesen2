@@ -46,7 +46,8 @@ namespace Mesen.Config
 		public bool VerboseLogging { get; set; } = false;
 		public bool ShowPaletteInfo { get; set; } = false;
 		public bool DrawTileBorders { get; set; } = false;
-		public bool DumpAllPaletteVariants { get; set; } = false;
+		// DumpAllPaletteVariants is always true now - required for correct tile matching
+		public bool DumpAllPaletteVariants { get; set; } = true;
 
 		public HdPackBuilderOptions ToInterop(string saveFolder)
 		{

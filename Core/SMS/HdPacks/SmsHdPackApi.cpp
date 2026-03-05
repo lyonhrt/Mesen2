@@ -49,7 +49,7 @@ namespace SmsHdPackApi {
     };
 
     struct HdEntry { int ImgIndex=-1; uint16_t X=0; uint16_t Y=0; bool IsSprite=false; uint8_t PaletteGroup=0; bool ApplyFade=true; uint32_t BasePaletteColors=0; };
-    struct ParsedTiles { std::vector<std::array<std::string,10>> rows; std::vector<bool> isSprite; };
+    struct ParsedTiles { std::vector<std::array<std::string,11>> rows; std::vector<bool> isSprite; };
     static bool g_hdReplacementEnabled = true;
     static bool g_hdPackLoaded = false;
     static uint32_t g_hdPackScale = 1;
@@ -84,10 +84,11 @@ namespace SmsHdPackApi {
         return h;
     }
 
-    static inline uint64_t ComputeCanonicalHash(const uint8_t* tileData32, bool isSprite, uint8_t /*palGroup*/, uint32_t paletteColors = 0)
+    static inline uint64_t ComputeCanonicalHash(const uint8_t* tileData32, bool isSprite, uint8_t palGroup, uint32_t paletteColors, bool isSg1000Mode)
     {
-        // Hash: pattern data (32 bytes) + palette colors (4 bytes) + sprite flag
-        // PaletteColors must be included to distinguish tiles with same pattern but different colors
+        // Hash: pattern data (32 bytes) + palette info + sprite flag
+        // For SMS/GG: use palGroup (stable palette bank index) not paletteColors (volatile CRAM bytes).
+        // For SG-1000: use paletteColors (color hash) because per-row colors distinguish tiles.
         const uint64_t FNV_OFFSET = 1469598103934665603ULL;
         const uint64_t FNV_PRIME  = 1099511628211ULL;
         uint64_t h = FNV_OFFSET;
@@ -95,15 +96,19 @@ namespace SmsHdPackApi {
             h ^= (uint64_t)tileData32[i];
             h *= FNV_PRIME;
         }
-        // Include PaletteColors in hash
-        for(int i = 0; i < 4; i++) {
-            h ^= (uint64_t)((paletteColors >> (i*8)) & 0xFF);
-            h *= FNV_PRIME;
-        }
+        
+        // Include both palGroup AND paletteColors in hash for all modes.
+        // This ensures tiles with same pattern but different palette colors get different hashes.
+        // Without this, solid color tiles (e.g., blue sky vs yellow sky) would share the same
+        // hash and PNG location, causing wrong colors at runtime.
+        h ^= (uint64_t)palGroup;
+        h *= FNV_PRIME;
+        h ^= (uint64_t)paletteColors;
+        h *= FNV_PRIME;
+        
         h ^= (uint64_t)(isSprite ? 1 : 0); h *= FNV_PRIME;
         return h;
     }
-
     static uint8_t ComputeFadeBrightness(uint32_t currentPaletteColors, uint32_t basePaletteColors);
 
 #ifdef SMS_HD_DEBUG
@@ -209,12 +214,12 @@ namespace SmsHdPackApi {
                 // Remove possible trailing closing tag
                 size_t close = content.find("</tile>"); if(close != std::string::npos) content = content.substr(0, close);
                 // Split by comma
-                std::vector<std::string> parts; parts.reserve(10);
+                std::vector<std::string> parts; parts.reserve(11);
                 std::stringstream ss(content); std::string tok;
                 while(std::getline(ss, tok, ',')) { ltrim(tok); rtrim(tok); parts.push_back(tok); }
                 if(parts.size() < 5) continue; // require at least imgIndex, tileHex, paletteHex, x, y
-                std::array<std::string,10> row{};
-                for(size_t i=0;i<10;i++) {
+                std::array<std::string,11> row{};
+                for(size_t i=0;i<11;i++) {
                     row[i] = (i < parts.size()) ? parts[i] : std::string();
                 }
                 // Ensure brightness and default fields present (indices 5,6)
@@ -223,6 +228,7 @@ namespace SmsHdPackApi {
                 // row[7] = PaletteColors hex (optional, may be empty for old packs)
                 // row[8] = ApplyFade flag: Y/N (optional, default Y)
                 // row[9] = BasePaletteColors hex (optional, used with ApplyFade)
+                // row[10] = isSg1000Mode: S/M (optional, default M for SMS/GG)
                 outTiles.rows.push_back(row);
                 outTiles.isSprite.push_back(sectionIsSprite);
                 continue;
@@ -310,21 +316,25 @@ namespace SmsHdPackApi {
                 entry.BasePaletteColors = paletteColors; // Default: base = current
             }
 
+            // Parse isSg1000Mode from field 10 (S/M, default M for SMS/GG)
+            bool isSg1000Mode = false;
+            if(!p[10].empty()) {
+                isSg1000Mode = (p[10][0] == 'S' || p[10][0] == 's');
+            }
+
             // New format: 32-byte pattern hex; fallback: index hex
             if(tileField.size() >= 64) {
                 std::array<uint8_t,32> pattern{};
                 if(ParseHexToBytes(tileField, pattern)) {
-                    uint64_t h = ComputeCanonicalHash(pattern.data(), isSpr, palGroup, paletteColors);
+                    // Use explicit isSg1000Mode from manifest field 10
+                    // Do NOT detect from pattern data - blank SMS tiles have same pattern as SG-1000
+                    uint64_t h = ComputeCanonicalHash(pattern.data(), isSpr, palGroup, paletteColors, isSg1000Mode);
                     g_hdHashMap[h] = entry;
 
-                    // Build pattern-only fallback map for fade support and SG-1000 lookup
+                    // Build pattern-only fallback map for fade support
                     // Store the first (base) tile per pattern for fade fallback
-                    // SG-1000 tiles (bytes 8-31 zero) always go in pattern map for row bank handling
-                    bool isSg1000Pattern = true;
-                    for(int pi = 8; pi < 32; pi++) {
-                        if(pattern[pi] != 0) { isSg1000Pattern = false; break; }
-                    }
-                    if(entry.ApplyFade || isSg1000Pattern) {
+                    // SG-1000 tiles should NOT use pattern-only fallback (they need exact color hash match).
+                    if(entry.ApplyFade && !isSg1000Mode) {
                         uint64_t patHash = ComputePatternOnlyHash(pattern.data(), isSpr);
                         if(g_hdPatternMap.find(patHash) == g_hdPatternMap.end()) {
                             g_hdPatternMap[patHash] = entry;
@@ -419,14 +429,14 @@ namespace SmsHdPackApi {
 
     bool TryGetReplacementByHash(const uint8_t* tileData32, bool isSprite, uint8_t palGroup,
                                  int& imgIndex, uint16_t& srcX, uint16_t& srcY, uint32_t& scale,
-                                 uint32_t paletteColors)
+                                 uint32_t paletteColors, bool isSg1000Mode)
     {
         if(!IsHdReplacementEnabled() || !tileData32) return false;
         
         // Try exact hash match (pattern + palette) first.
         // This correctly distinguishes tiles with same pattern but different colors
         // (e.g. SG-1000 solid black vs solid red, or SMS tiles with different palettes).
-        uint64_t h = ComputeCanonicalHash(tileData32, isSprite, palGroup, paletteColors);
+        uint64_t h = ComputeCanonicalHash(tileData32, isSprite, palGroup, paletteColors, isSg1000Mode);
         auto it = g_hdHashMap.find(h);
         if(it != g_hdHashMap.end()) {
             const HdEntry& e = it->second;
@@ -440,27 +450,13 @@ namespace SmsHdPackApi {
         // Exact palette match failed — try fade fallback (pattern-only lookup)
         // Only accept if the current palette is a proportionally dimmer version of the base palette.
         // Reject if brightness is >= base (not a fade) or ratio is too low (completely different palette).
-        if(!g_hdPatternMap.empty()) {
-            // Detect SG-1000 tiles: bytes 8-31 are all zero (8-byte 1bpp format)
-            bool isSg1000Tile = true;
-            for(int i = 8; i < 32; i++) {
-                if(tileData32[i] != 0) { isSg1000Tile = false; break; }
-            }
-
+        // SG-1000 tiles should NOT use pattern-only fallback (they need exact color hash match).
+        if(!g_hdPatternMap.empty() && !isSg1000Mode) {
             uint64_t patHash = ComputePatternOnlyHash(tileData32, isSprite);
             auto patIt = g_hdPatternMap.find(patHash);
             if(patIt != g_hdPatternMap.end()) {
-                if(isSg1000Tile) {
-                    // SG-1000: accept pattern match unconditionally.
-                    // Color hash in PaletteColors may differ between dump and render
-                    // due to row bank variations in Mode 2, so ignore palette here.
-                    const HdEntry& e = patIt->second;
-                    imgIndex = e.ImgIndex;
-                    srcX = e.X;
-                    srcY = e.Y;
-                    scale = g_hdPackScale;
-                    return true;
-                } else if(patIt->second.ApplyFade) {
+                // Pattern-only fallback is only for SMS/GG fade support.
+                if(patIt->second.ApplyFade) {
                     uint8_t fadeBright = ComputeFadeBrightness(paletteColors, patIt->second.BasePaletteColors);
                     // Accept only if actually dimmer (fadeBright < 255) and not a wildly different palette (>= 25)
                     if(fadeBright < 255 && fadeBright >= 25) {
@@ -524,12 +520,15 @@ namespace SmsHdPackApi {
 
     // Get the fade brightness for a tile (255 = no fade, <255 = faded).
     // Call after TryGetReplacementByHash succeeds to determine if brightness adjustment is needed.
-    uint8_t GetFadeBrightness(const uint8_t* tileData32, bool isSprite, uint32_t paletteColors)
+    uint8_t GetFadeBrightness(const uint8_t* tileData32, bool isSprite, uint8_t palGroup, uint32_t paletteColors, bool isSg1000Mode)
     {
         if(!tileData32) return 255;
         
+        // SG-1000 tiles don't use fade - they need exact color hash match
+        if(isSg1000Mode) return 255;
+        
         // Check if exact match exists (no fade needed)
-        uint64_t h = ComputeCanonicalHash(tileData32, isSprite, 0, paletteColors);
+        uint64_t h = ComputeCanonicalHash(tileData32, isSprite, palGroup, paletteColors, false);
         if(g_hdHashMap.find(h) != g_hdHashMap.end()) {
             return 255; // Exact match — no fade
         }

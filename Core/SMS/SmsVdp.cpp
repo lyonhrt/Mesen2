@@ -533,6 +533,7 @@ void SmsVdp::LoadBgTilesSg()
 			uint16_t ntAddr = _state.NametableAddress + ((x / 8) + tilemapRow * 32);
 
 			uint8_t tileRow = (y & 0x07);
+			_bgLogicalRow = tileRow;
 			_bgTileIndex = ReadVram(ntAddr, SmsVdpMemAccess::BgLoadTable);
 			if(_state.M3_Use240LineMode) {
 				//Mode 3 - "Multicolor"
@@ -642,7 +643,7 @@ void SmsVdp::LoadBgTilesSg()
 				_hdBgTileCur.PaletteIndex = 0;
 				_hdBgTileCur.HMirror = false;
 				_hdBgTileCur.VMirror = false;
-				_hdBgTileCur.RowInTile = _state.Scanline & 0x07;
+				_hdBgTileCur.RowInTile = _bgLogicalRow;
 				_hdBgTileCur.Valid = true;
 				_hdBgTileCur.IsSg1000Mode = true;
 			}
@@ -742,12 +743,23 @@ void SmsVdp::DrawPixel()
 		//   _pixelsAvailable > 16 → prev2 (only possible with borderWidth >= 7)
 		//   _pixelsAvailable > 8  → prev
 		//   _pixelsAvailable <= 8 → cur
-		const HdBgTileInfo& tile = (_pixelsAvailable > 16 && _hdBgTilePrev2.Valid) ? _hdBgTilePrev2 :
-		                           (_pixelsAvailable > 8 && _hdBgTilePrev.Valid) ? _hdBgTilePrev :
-		                           _hdBgTileCur;
+		// Select tile from ring buffer based on pixels remaining
+		// Also calculate the correct column within that specific tile
+		uint8_t colInTile;
+		const HdBgTileInfo* tilePtr;
+		if(_pixelsAvailable > 16 && _hdBgTilePrev2.Valid) {
+			tilePtr = &_hdBgTilePrev2;
+			colInTile = (24 - _pixelsAvailable) & 7;  // Column in prev2 tile
+		} else if(_pixelsAvailable > 8 && _hdBgTilePrev.Valid) {
+			tilePtr = &_hdBgTilePrev;
+			colInTile = (16 - _pixelsAvailable) & 7;  // Column in prev tile
+		} else {
+			tilePtr = &_hdBgTileCur;
+			colInTile = (8 - _pixelsAvailable) & 7;   // Column in current tile
+		}
+		const HdBgTileInfo& tile = *tilePtr;
 		
 		if(tile.Valid) {
-			uint8_t colInTile = (8 - _pixelsAvailable) & 7;
 			
 			HdPixelInfo& info = _hdPixelInfoWrite[pixelIdx];
 			memcpy(info.Bg.TileData, tile.TileData, 32);

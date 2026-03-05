@@ -32,5 +32,14 @@ namespace SmsHdPackSharedConstants {
 		bool IsValid() const {
 			return Format != PaletteFormat::None && EntryCount > 0 && BytesPerEntry > 0;
 		}
+
+		bool IsAllZero() const {
+			size_t bytesToCheck = static_cast<size_t>(EntryCount) * BytesPerEntry;
+			if(bytesToCheck == 0 || bytesToCheck > sizeof(Data)) return true;
+			for(size_t i = 0; i < bytesToCheck; i++) {
+				if(Data[i] != 0) return false;
+			}
+			return true;
+		}
 	};
 }

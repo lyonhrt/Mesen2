@@ -603,7 +603,7 @@ void HdPackBuilderSms::GenerateHdNesManifest(std::ofstream& manifestFile)
     manifestFile << "# <img>       - PNG sheet filename (index is order of appearance, starting at 0)" << std::endl;
     manifestFile << "# <paletteFormat> - Palette byte format: sms (--BBGGRR 6-bit) or gg (GGGGRRRR 12-bit)" << std::endl;
     manifestFile << "#" << std::endl;
-    manifestFile << "# <tile> format: 10 comma-separated fields" << std::endl;
+    manifestFile << "# <tile> format: 11 comma-separated fields" << std::endl;
     manifestFile << "#   Field 0: imgIndex         - Index of the PNG sheet (matches <img> declaration order)" << std::endl;
     manifestFile << "#   Field 1: tileData         - 32-byte tile pattern as 64-char hex (8x8 tile, 4 bitplanes)" << std::endl;
     manifestFile << "#   Field 2: paletteIndex     - Palette bank: 0 = low (BG), 1 = high (sprites). SG-1000: color byte" << std::endl;
@@ -614,6 +614,7 @@ void HdPackBuilderSms::GenerateHdNesManifest(std::ofstream& manifestFile)
     manifestFile << "#   Field 7: paletteColors    - 4-byte packed CRAM snapshot as 8-char hex (palette-sensitive matching)" << std::endl;
     manifestFile << "#   Field 8: applyFade        - Y = emulator applies runtime fade effect, N = use tile as-is" << std::endl;
     manifestFile << "#   Field 9: basePaletteColors - Base (brightest) palette as 8-char hex (used for fade calculation)" << std::endl;
+    manifestFile << "#   Field 10: isSg1000Mode    - S = SG-1000/TMS9918 tile, M = SMS/GG Mode 4 tile" << std::endl;
     manifestFile << "#" << std::endl;
     manifestFile << "# Section comments (# SPRITES_xxx.png, # BGTILES_xxx.png) indicate sprite vs background tiles" << std::endl;
     manifestFile << std::endl;
@@ -652,46 +653,41 @@ void HdPackBuilderSms::GenerateHdNesManifest(std::ofstream& manifestFile)
         std::stringstream ss; ss << std::uppercase << std::hex << std::setw(width) << std::setfill('0') << value; return ss.str();
     };
 
+    // Helper to write a single tile entry to manifest
+    auto writeTileEntry = [&](const HdPackTileInfoSms* t, int imgIndex, uint32_t x, uint32_t y) {
+        if(!t) return;
+        
+        std::stringstream tileDataHex;
+        tileDataHex << std::uppercase << std::hex;
+        for(int b = 0; b < (int)SmsHdPackConstants::SMS_TILE_DATA_SIZE; b++) {
+            tileDataHex << std::setw(2) << std::setfill('0') << (int)t->TileData[b];
+        }
+        
+        int paletteIndex = (int)t->PaletteIndex;
+        char defFlag = t->DefaultTile ? 'Y' : 'N';
+        std::string palColorsHex = HexUtilities::ToHex(t->PaletteColors);
+        char fadeFlag = t->ApplyFade ? 'Y' : 'N';
+        std::string basePalHex = HexUtilities::ToHex(t->BasePaletteColors);
+        char sg1000Flag = t->IsSg1000Mode ? 'S' : 'M';
+        
+        manifestFile << "<tile>" << imgIndex << "," << tileDataHex.str() << "," << paletteIndex
+                     << "," << x << "," << y << ",1," << defFlag << "," << palColorsHex
+                     << "," << fadeFlag << "," << basePalHex << "," << sg1000Flag << std::endl;
+    };
+
     for(size_t i = 0; i < _sheetInfos.size(); i++) {
         const SheetInfo& si = _sheetInfos[i];
         int imgIndex = (int)i;
         manifestFile << "#" << si.Filename << std::endl;
 
         for(const SheetTileRef& tr : si.Tiles) {
-            const HdPackTileInfoSms* t = tr.Tile;
-            if(!t) continue;
-
-            // Tile data: write 32-byte pattern as hex (HDNES CHR-RAM style)
-            // This ensures replacement is keyed by the actual tile pattern, not a transient index.
-            std::stringstream tileDataHex;
-            tileDataHex << std::uppercase << std::hex;
-            for(int b = 0; b < (int)SmsHdPackConstants::SMS_TILE_DATA_SIZE; b++) {
-                tileDataHex << std::setw(2) << std::setfill('0') << (int)t->TileData[b];
+            // Write primary tile
+            writeTileEntry(tr.Tile, imgIndex, tr.X, tr.Y);
+            
+            // Write alternate tiles (same visual, different TileData/palette) pointing to same PNG location
+            for(const HdPackTileInfoSms* alt : tr.AlternateTiles) {
+                writeTileEntry(alt, imgIndex, tr.X, tr.Y);
             }
-
-            // Palette index: 0 for low palette, 1 for high palette (decimal)
-            // For SG-1000, use PaletteColors (color byte) instead of PaletteIndex
-            int paletteIndex = t->IsSg1000Mode ? (int)(t->PaletteColors & 0xFF) : (int)t->PaletteIndex;
-
-            // Coordinates are pixel positions in the PNG
-            uint32_t x = tr.X;
-            uint32_t y = tr.Y;
-
-            // Brightness: 1 (default)
-            // Default tile flag based on t->DefaultTile
-            char defFlag = t->DefaultTile ? 'Y' : 'N';
-
-            // PaletteColors: packed 4-byte CRAM snapshot for palette-sensitive hashing
-            std::string palColorsHex = HexUtilities::ToHex(t->PaletteColors);
-
-            // ApplyFade: Y = apply runtime fade (renderer computes brightness from current vs base palette)
-            //            N = use this tile as-is (user dumped a specific faded variant intentionally)
-            char fadeFlag = t->ApplyFade ? 'Y' : 'N';
-            std::string basePalHex = HexUtilities::ToHex(t->BasePaletteColors);
-
-            manifestFile << "<tile>" << imgIndex << "," << tileDataHex.str() << "," << paletteIndex
-                         << "," << x << "," << y << ",1," << defFlag << "," << palColorsHex
-                         << "," << fadeFlag << "," << basePalHex << std::endl;
         }
 
         manifestFile << std::endl;
@@ -1741,11 +1737,10 @@ void HdPackBuilderSms::GenerateHdTile(HdPackTileInfoSms* tile) {
     uint8_t tileData[SmsHdPackConstants::SMS_TILE_DATA_SIZE] = {0};
     memcpy(tileData, tile->TileData, SmsHdPackConstants::SMS_TILE_DATA_SIZE);
     
-    // Only update palette as fallback when tile has no captured palette data.
-    // The tile's CapturedPalette (from capture time) is the correct palette;
-    // reading the current VDP palette would give wrong colors for tiles captured
-    // during earlier frames with different palette states.
-    if(!tile->CapturedPalette.IsValid() && _vdp) {
+    // Only update palette as fallback when tile has no captured palette data,
+    // or when the captured palette is all-zero (CRAM not yet initialized at capture time).
+    // All-zero palette produces all-black tiles which is never correct for a visible tile.
+    if((!tile->CapturedPalette.IsValid() || tile->CapturedPalette.IsAllZero()) && _vdp) {
         UpdatePalette();
     }
     
@@ -1818,12 +1813,19 @@ void HdPackBuilderSms::GenerateHdTile(HdPackTileInfoSms* tile) {
             }
         } else {
             // SG-1000 BG tiles: per-row FG/BG colors from CapturedPalette
+            // For BG tiles, color 0 should be opaque (backdrop color), not transparent
+            auto sgToArgbBg = [](uint8_t colorIdx) -> uint32_t {
+                if(colorIdx >= 16) return 0xFF000000;
+                if(colorIdx == 0) return 0xFF000000; // Color 0 = opaque black for BG tiles
+                return sg1000Palette[colorIdx];
+            };
+            
             for(int y = 0; y < 8; y++) {
                 uint8_t colorByte = tile->CapturedPalette.Data[y]; // Per-row color byte
                 uint8_t fgColor = (colorByte >> 4) & 0x0F;
                 uint8_t bgColor = colorByte & 0x0F;
-                uint32_t fgRgb = sgToArgb(fgColor);
-                uint32_t bgRgb = sgToArgb(bgColor);
+                uint32_t fgRgb = sgToArgbBg(fgColor);
+                uint32_t bgRgb = sgToArgbBg(bgColor);
                 
                 uint8_t patternByte = tileData[y];
                 for(int x = 0; x < 8; x++) {
@@ -2881,6 +2883,9 @@ void HdPackBuilderSms::SaveHdPack()
         MessageManager::Log("[SMS HD Pack] No tiles to save, skipping");
         return;
     }
+    
+    // Clear visual hash alternates map for fresh tracking
+    _visualHashAlternates.clear();
         
     MessageManager::Log("[SMS HD Pack] Found " + std::to_string(_hdData.Tiles.size()) + " tiles to save");
     
@@ -3132,10 +3137,32 @@ void HdPackBuilderSms::DrawTile(HdPackTileInfoSms* tile, int tileNumber, uint32_
  * @param isSprite Whether these are sprite tiles (affects filtering criteria)
  * @return Vector of valid, unique tiles ready for sheet creation
  */
+// Helper function to detect backdrop tiles (all-zero pattern data)
+// These tiles render as solid backdrop/BG color and should be dumped even if they appear "empty" (all black)
+static bool IsBackdropTile(HdPackTileInfoSms* tile) {
+    if(!tile) return false;
+    
+    if(tile->IsSg1000Mode) {
+        // SG-1000: check first 8 bytes (pattern data)
+        // Bytes 8-15 contain per-row color data, so we only check pattern
+        for(int i = 0; i < 8; i++) {
+            if(tile->TileData[i] != 0) return false;
+        }
+        return true;
+    } else {
+        // SMS Mode 4: check all 32 bytes (4 bitplanes × 8 rows)
+        for(int i = 0; i < 32; i++) {
+            if(tile->TileData[i] != 0) return false;
+        }
+        return true;
+    }
+}
+
 vector<HdPackTileInfoSms*> HdPackBuilderSms::FilterValidTiles(const vector<HdPackTileInfoSms*>& inputTiles, bool isSprite)
 {
     vector<HdPackTileInfoSms*> validTiles;
-    std::unordered_set<uint64_t> tileHashes;
+    // Map visual hash -> index in validTiles (to track alternates)
+    std::unordered_map<uint64_t, size_t> hashToIndex;
     
     if(_options.DebugMode) {
         MessageManager::Log("[SMS HD Pack] Filtering " + std::to_string(inputTiles.size()) + " " + 
@@ -3176,9 +3203,20 @@ vector<HdPackTileInfoSms*> HdPackBuilderSms::FilterValidTiles(const vector<HdPac
                 continue;
             }
         } else {
-            // Background tiles: stricter filtering to avoid dumping empty/black space
-            if(isEmpty || nonTransparentPixels < 3) {
-                continue;
+            // Background tiles: check if this is a backdrop tile (all-zero pattern data)
+            bool isBackdrop = IsBackdropTile(tile);
+            
+            if(isBackdrop) {
+                // Backdrop tiles render as solid backdrop/BG color - allow them even if they appear "empty"
+                // They must still have opaque pixels (backdrop color is opaque, not transparent)
+                if(nonTransparentPixels < 1) {
+                    continue;
+                }
+            } else {
+                // Non-backdrop tiles: stricter filtering to avoid dumping empty/black space
+                if(isEmpty || nonTransparentPixels < 3) {
+                    continue;
+                }
             }
         }
         
@@ -3201,12 +3239,20 @@ vector<HdPackTileInfoSms*> HdPackBuilderSms::FilterValidTiles(const vector<HdPac
         visualHash ^= (isSprite ? 0xDEADBEEF : 0xCAFEBABE);
         visualHash *= 1099511628211ULL;
         
-        // Check for duplicates
-        if(tileHashes.find(visualHash) == tileHashes.end()) {
+        // Check for duplicates - track alternates for manifest
+        auto it = hashToIndex.find(visualHash);
+        if(it == hashToIndex.end()) {
+            // First tile with this visual hash
+            hashToIndex[visualHash] = validTiles.size();
             validTiles.push_back(tile);
-            tileHashes.insert(visualHash);
-        } else if(_options.DebugMode) {
-            MessageManager::Log("[SMS HD Pack] Skipping duplicate tile (visual hash collision)");
+        } else {
+            // Duplicate visual - store as alternate of the primary tile
+            // The primary tile's AlternateTiles will be populated in CreateTileSheets
+            // For now, store in a temporary map that CreateTileSheets can access
+            _visualHashAlternates[visualHash].push_back(tile);
+            if(_options.DebugMode) {
+                MessageManager::Log("[SMS HD Pack] Found alternate tile for visual hash (different TileData/palette)");
+            }
         }
     }
     
@@ -3278,7 +3324,7 @@ vector<HdPackTileInfoSms*> HdPackBuilderSms::FilterValidTiles(const vector<HdPac
  * @param pngWidth Width of the PNG buffer in pixels
  * @param tileSize Size of each tile in pixels (typically 8 * scale)
  */
-void HdPackBuilderSms::DrawTileToBuffer(HdPackTileInfoSms* tile, int gridX, int gridY, uint32_t* pngBuffer, int pngWidth, int tileSize)
+void HdPackBuilderSms::DrawTileToBuffer(HdPackTileInfoSms* tile, int gridX, int gridY, uint32_t* pngBuffer, int pngWidth, int pngHeight, int tileSize)
 {
     if(!tile || tile->HdTileData.empty() || !pngBuffer) {
         return;
@@ -3286,17 +3332,14 @@ void HdPackBuilderSms::DrawTileToBuffer(HdPackTileInfoSms* tile, int gridX, int 
     
     int tileX = gridX * tileSize;
     int tileY = gridY * tileSize;
-    // The sheet layout is a fixed 16x16 grid; compute the true buffer height in pixels
-    int pngHeight = 16 * tileSize;
     
     // Copy tile data to buffer with bounds checking
-    // tileSize is already 8 * scale, so we don't need the additional scale check
     for(int y = 0; y < tileSize; y++) {
         for(int x = 0; x < tileSize; x++) {
             int srcIndex = y * tileSize + x;
             int dstIndex = (tileY + y) * pngWidth + (tileX + x);
             
-            // Ensure writes stay within the PNG buffer: [0, pngWidth*pngHeight)
+            // Ensure writes stay within the PNG buffer
             if(srcIndex < (int)tile->HdTileData.size() && dstIndex >= 0 && 
                dstIndex < pngWidth * pngHeight) {
                 pngBuffer[dstIndex] = tile->HdTileData[srcIndex];
@@ -3346,7 +3389,6 @@ void HdPackBuilderSms::CreateTileSheets(const vector<HdPackTileInfoSms*>& tiles,
 {
     const int TILES_PER_SHEET = 16 * 16;
     const int gridWidth = 16;
-    const int gridHeight = 16;
     int totalSheets = static_cast<int>((tiles.size() + TILES_PER_SHEET - 1) / TILES_PER_SHEET);
     
     for(int sheetIndex = 0; sheetIndex < totalSheets; sheetIndex++) {
@@ -3354,11 +3396,16 @@ void HdPackBuilderSms::CreateTileSheets(const vector<HdPackTileInfoSms*>& tiles,
         int endTile = std::min((int)tiles.size(), startTile + TILES_PER_SHEET);
         int tilesInSheet = endTile - startTile;
         
+        // Calculate actual grid height needed (pack tightly like NES HD packs)
+        int gridHeight = (tilesInSheet + gridWidth - 1) / gridWidth;
+        if(gridHeight < 1) gridHeight = 1;
+        
         int tileSize = 8 * _hdData.Scale;
         int pngWidth = gridWidth * tileSize;
         int pngHeight = gridHeight * tileSize;
         
-        vector<uint32_t> pngBuffer(pngWidth * pngHeight, 0x00000000);
+        // Use magenta (0xFFFF00FF) as background - standard HD pack transparency color
+        vector<uint32_t> pngBuffer(pngWidth * pngHeight, 0xFFFF00FF);
         
         // Prepare a new sheet info to track tile coordinates for manifest
         SheetInfo sheetInfo;
@@ -3373,7 +3420,7 @@ void HdPackBuilderSms::CreateTileSheets(const vector<HdPackTileInfoSms*>& tiles,
             int gridX = i % gridWidth;
             int gridY = i / gridWidth;
             
-            DrawTileToBuffer(tile, gridX, gridY, pngBuffer.data(), pngWidth, tileSize);
+            DrawTileToBuffer(tile, gridX, gridY, pngBuffer.data(), pngWidth, pngHeight, tileSize);
 
             // Optional tile border overlay for debugging/visual alignment
             if(_options.DrawTileBorders) {
@@ -3382,8 +3429,31 @@ void HdPackBuilderSms::CreateTileSheets(const vector<HdPackTileInfoSms*>& tiles,
                 DrawTileBorder(gridX, gridY, pngBuffer.data(), pngWidth, tileSize, borderColor);
             }
 
-            // Record mapping for manifest (pixel coordinates)
-            SheetTileRef tr { tile, (uint16_t)(gridX * tileSize), (uint16_t)(gridY * tileSize) };
+            // Compute visual hash to find alternates
+            uint64_t visualHash = 14695981039346656037ULL;
+            for(size_t j = 0; j < tile->HdTileData.size(); j++) {
+                uint32_t pixel = tile->HdTileData[j];
+                visualHash ^= (pixel & 0xFF);
+                visualHash *= 1099511628211ULL;
+                visualHash ^= ((pixel >> 8) & 0xFF);
+                visualHash *= 1099511628211ULL;
+                visualHash ^= ((pixel >> 16) & 0xFF);
+                visualHash *= 1099511628211ULL;
+                visualHash ^= ((pixel >> 24) & 0xFF);
+                visualHash *= 1099511628211ULL;
+            }
+            visualHash ^= (isSprite ? 0xDEADBEEF : 0xCAFEBABE);
+            visualHash *= 1099511628211ULL;
+
+            // Record mapping for manifest (pixel coordinates) with alternates
+            SheetTileRef tr { tile, (uint16_t)(gridX * tileSize), (uint16_t)(gridY * tileSize), {} };
+            
+            // Look up alternates (tiles with same visual but different TileData/palette)
+            auto altIt = _visualHashAlternates.find(visualHash);
+            if(altIt != _visualHashAlternates.end()) {
+                tr.AlternateTiles = altIt->second;
+            }
+            
             sheetInfo.Tiles.push_back(tr);
         }
         
@@ -3514,11 +3584,14 @@ uint64_t HdPackBuilderSms::GetCanonicalHash(const HdTileKeySms& key) const
         }
     }
 
-    // Include PaletteColors in hash - needed to distinguish tiles with same pattern but different colors
-    for(int i = 0; i < 4; i++) {
-        h ^= (uint64_t)((key.PaletteColors >> (i*8)) & 0xFF);
-        h *= FNV_PRIME;
-    }
+    // Include both PaletteIndex AND PaletteColors in hash for all modes.
+    // This ensures tiles with same pattern but different palette colors get different hashes.
+    // Without this, solid color tiles (e.g., blue sky vs yellow sky) would share the same
+    // hash and PNG location, causing wrong colors at runtime.
+    h ^= (uint64_t)key.PaletteIndex;
+    h *= FNV_PRIME;
+    h ^= (uint64_t)key.PaletteColors;
+    h *= FNV_PRIME;
 
     // Sprite/background flag
     h ^= (uint64_t)(key.IsSprite ? 1 : 0);
@@ -3540,11 +3613,14 @@ uint64_t HdPackBuilderSms::GetCanonicalHash(const HdPackTileInfoSms* tile) const
         h *= FNV_PRIME;
     }
 
-    // Include PaletteColors in hash
-    for(int i = 0; i < 4; i++) {
-        h ^= (uint64_t)((tile->PaletteColors >> (i*8)) & 0xFF);
-        h *= FNV_PRIME;
-    }
+    // Include both PaletteIndex AND PaletteColors in hash for all modes.
+    // This ensures tiles with same pattern but different palette colors get different hashes.
+    // Without this, solid color tiles (e.g., blue sky vs yellow sky) would share the same
+    // hash and PNG location, causing wrong colors at runtime.
+    h ^= (uint64_t)tile->PaletteIndex;
+    h *= FNV_PRIME;
+    h ^= (uint64_t)tile->PaletteColors;
+    h *= FNV_PRIME;
 
     // Sprite/background flag
     h ^= (uint64_t)(tile->IsSprite ? 1 : 0);

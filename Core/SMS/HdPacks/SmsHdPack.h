@@ -314,9 +314,10 @@ private:
 
 		// Step 1: Draw BG tile (if present)
 		if(pixelInfo->Bg.HasTileData) {
-			// For SG-1000 tiles, use PaletteColors (color byte with FG/BG colors)
-			// For SMS/GG tiles, use PaletteIndex (0 or 1)
-			uint8_t bgPalGroup = pixelInfo->Bg.IsSg1000Mode ? (uint8_t)(pixelInfo->Bg.PaletteColors & 0xFF) : pixelInfo->Bg.PaletteIndex;
+			// SG-1000 tiles always use palGroup=0 (no palette banks in TMS9918).
+			// PaletteColors for SG-1000 is a color hash, not a palette index.
+			// SMS/GG tiles use PaletteIndex (0 = low/BG, 1 = high/sprite).
+			uint8_t bgPalGroup = pixelInfo->Bg.IsSg1000Mode ? 0 : pixelInfo->Bg.PaletteIndex;
 				
 				int imgIndex = -1;
 				uint16_t srcX = 0, srcY = 0;
@@ -354,7 +355,7 @@ private:
 					// Look up HD replacement for this tile
 					if(SmsHdPackApi::TryGetReplacementByHash(pixelInfo->Bg.TileData, false, bgPalGroup,
 					                                          imgIndex, srcX, srcY, hdScale,
-					                                          pixelInfo->Bg.PaletteColors)) {
+					                                          pixelInfo->Bg.PaletteColors, pixelInfo->Bg.IsSg1000Mode)) {
 						// Cache the result for subsequent pixels of the same tile
 						_cachedBgTile.ImgIndex = imgIndex;
 						_cachedBgTile.SrcX = srcX;
@@ -379,7 +380,7 @@ private:
 				if(imgIndex >= 0) {
 					// Found HD replacement for BG - compute fade brightness and draw
 					uint8_t bgFade = SmsHdPackApi::GetFadeBrightness(
-						pixelInfo->Bg.TileData, false, pixelInfo->Bg.PaletteColors);
+						pixelInfo->Bg.TileData, false, bgPalGroup, pixelInfo->Bg.PaletteColors, pixelInfo->Bg.IsSg1000Mode);
 					DrawHdTilePixelFromApi(imgIndex, srcX, srcY, hdScale, 
 					                       pixelInfo->Bg.TileX, pixelInfo->Bg.TileY,
 					                       pixelInfo->Bg.HMirror, pixelInfo->Bg.VMirror,
@@ -453,15 +454,15 @@ private:
 			uint16_t srcX = 0, srcY = 0;
 			uint32_t hdScale = 1;
 			
-			// For SG-1000 sprites, use PaletteColors (sprite color)
-			// For SMS/GG sprites, use palette group 1 (high palette)
-			uint8_t spritePalGroup = pixelInfo->Sprite.IsSg1000Mode ? (uint8_t)(pixelInfo->Sprite.PaletteColors & 0xFF) : 1;
+			// SG-1000 sprites have no palette banks — always palGroup=0.
+			// SMS/GG sprites always use high palette (group 1).
+			uint8_t spritePalGroup = pixelInfo->Sprite.IsSg1000Mode ? 0 : 1;
 			
 			// Sprites: Don't cache - multiple different sprites can appear on the same scanline
 			// and caching causes incorrect tiles to be drawn when sprites overlap or change
 			SmsHdPackApi::TryGetReplacementByHash(pixelInfo->Sprite.TileData, true, spritePalGroup,
 			                                      imgIndex, srcX, srcY, hdScale,
-			                                      pixelInfo->Sprite.PaletteColors);
+			                                      pixelInfo->Sprite.PaletteColors, pixelInfo->Sprite.IsSg1000Mode);
 			
 			if(imgIndex >= 0) {
 				// Found HD replacement for sprite - draw it on top of BG
@@ -485,7 +486,7 @@ private:
 						" scale=" + std::to_string(scale));
 				}
 				uint8_t sprFade = SmsHdPackApi::GetFadeBrightness(
-					pixelInfo->Sprite.TileData, true, pixelInfo->Sprite.PaletteColors);
+					pixelInfo->Sprite.TileData, true, spritePalGroup, pixelInfo->Sprite.PaletteColors, pixelInfo->Sprite.IsSg1000Mode);
 				DrawHdTilePixelFromApi(imgIndex, srcX, srcY, hdScale, 
 				                       pixelInfo->Sprite.TileX, pixelInfo->Sprite.TileY,
 				                       pixelInfo->Sprite.HMirror, pixelInfo->Sprite.VMirror,

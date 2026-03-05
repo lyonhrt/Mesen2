@@ -50,9 +50,10 @@ namespace SmsHdPackApi {
                                   int& imgIndex, uint16_t& srcX, uint16_t& srcY, uint32_t& scale);
 
     // Lookup replacement by canonical hash of (tileData[32], palGroup, isSprite, paletteColors)
+    // isSg1000Mode: true for SG-1000/TMS9918 tiles (uses paletteColors in hash), false for SMS/GG (uses palGroup)
     bool TryGetReplacementByHash(const uint8_t* tileData32, bool isSprite, uint8_t palGroup,
                                  int& imgIndex, uint16_t& srcX, uint16_t& srcY, uint32_t& scale,
-                                 uint32_t paletteColors = 0);
+                                 uint32_t paletteColors, bool isSg1000Mode);
 
     // Sample 8 pixels from a replacement row for a given tile row
     // - imgIndex/srcX/srcY/scale come from TryGetReplacement*
@@ -69,7 +70,8 @@ namespace SmsHdPackApi {
     // Get fade brightness for a tile (255 = no fade, <255 = faded).
     // Call after TryGetReplacementByHash succeeds to check if brightness adjustment is needed.
     // When the current palette is dimmer than the base palette, returns a proportional brightness value.
-    uint8_t GetFadeBrightness(const uint8_t* tileData32, bool isSprite, uint32_t paletteColors);
+    // isSg1000Mode: true for SG-1000/TMS9918 tiles (no fade support), false for SMS/GG
+    uint8_t GetFadeBrightness(const uint8_t* tileData32, bool isSprite, uint8_t palGroup, uint32_t paletteColors, bool isSg1000Mode);
 
     // Get the HD pack scale
     uint32_t GetHdPackScale();

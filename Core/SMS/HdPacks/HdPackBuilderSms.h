@@ -120,6 +120,10 @@ private:
     std::unordered_map<uint64_t, BaseTileEntry> _baseTileMap;
     uint32_t _fadedTilesSkipped = 0;
 
+    // Visual hash -> alternate tiles (tiles with different TileData/palette but same visual output)
+    // Used by FilterValidTiles to track alternates, consumed by CreateTileSheets for manifest
+    std::unordered_map<uint64_t, std::vector<HdPackTileInfoSms*>> _visualHashAlternates;
+
     static uint64_t ComputePatternHash(const uint8_t* tileData, bool isSprite);
     uint32_t ComputePaletteBrightness(uint32_t paletteColors);
     bool IsFadedVariant(const HdTileKeySms& key, bool isSprite);
@@ -155,7 +159,7 @@ private:
     // SaveTileSheet helper functions for better modularity
     vector<HdPackTileInfoSms*> FilterValidTiles(const vector<HdPackTileInfoSms*>& inputTiles, bool isSprite);
     void CreateTileSheets(const vector<HdPackTileInfoSms*>& tiles, const string& saveFolder, const string& filename, bool isSprite);
-    void DrawTileToBuffer(HdPackTileInfoSms* tile, int gridX, int gridY, uint32_t* pngBuffer, int pngWidth, int tileSize);
+    void DrawTileToBuffer(HdPackTileInfoSms* tile, int gridX, int gridY, uint32_t* pngBuffer, int pngWidth, int pngHeight, int tileSize);
     void DrawTileBorder(int gridX, int gridY, uint32_t* pngBuffer, int pngWidth, int tileSize, uint32_t color);
     string GenerateSheetFilename(const string& baseFilename, int sheetIndex, int totalSheets);
     
@@ -205,7 +209,8 @@ private:
     void SaveDebugInfo();  // Save debug information to a log file
 
     // Mapping of saved tile sheets and per-tile positions for HDNes-style manifest output
-    struct SheetTileRef { HdPackTileInfoSms* Tile; uint16_t X; uint16_t Y; };
+    // AlternateTiles: other tiles with different TileData/palette that produce the same visual output
+    struct SheetTileRef { HdPackTileInfoSms* Tile; uint16_t X; uint16_t Y; std::vector<HdPackTileInfoSms*> AlternateTiles; };
     struct SheetInfo { string Filename; bool IsSprite; std::vector<SheetTileRef> Tiles; };
     std::vector<SheetInfo> _sheetInfos;
 };

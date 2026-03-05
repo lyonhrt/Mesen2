@@ -5,11 +5,11 @@
         xmlns:vm="using:Mesen.ViewModels"
         xmlns:c="using:Mesen.Controls"
         xmlns:l="using:Mesen.Localization"
-        mc:Ignorable="d" d:DesignWidth="600" d:DesignHeight="500"
+        mc:Ignorable="d" d:DesignWidth="500" d:DesignHeight="350"
         x:Class="Mesen.Views.SmsHdPackBuilderWindow"
         x:DataType="vm:SmsHdPackBuilderViewModel"
         Title="{l:Translate wndTitle}"
-        Width="600" Height="500"
+        Width="500" Height="350"
         Icon="/Assets/HdPack.png"
         WindowStartupLocation="CenterOwner">
 
@@ -19,51 +19,19 @@
 
   <Grid Margin="10">
     <Grid.RowDefinitions>
-      <RowDefinition Height="Auto" />
       <RowDefinition Height="*" />
       <RowDefinition Height="Auto" />
     </Grid.RowDefinitions>
 
-    <!-- Header -->
-    <StackPanel Grid.Row="0" Margin="0,0,0,10">
-      <TextBlock Text="The SMS HD Pack Builder allows you to record tile usage while playing a game and generate PNG files that can be used to create HD texture packs for SMS/Game Gear/SG-1000 games." 
-                 TextWrapping="Wrap" 
-                 Margin="0,0,0,10" />
-      
-      <Border Background="{DynamicResource SystemControlBackgroundBaseLowBrush}" 
-              BorderBrush="{DynamicResource SystemControlForegroundBaseMediumLowBrush}"
-              BorderThickness="1" 
-              CornerRadius="3" 
-              Padding="10">
-        <TextBlock Text="Important: Start recording, play through the game sections you want to capture, then stop recording. The tool will generate tile sheets and manifest files for HD pack creation." 
-                   TextWrapping="Wrap" 
-                   Foreground="{DynamicResource SystemControlForegroundBaseHighBrush}" />
-      </Border>
-    </StackPanel>
-
     <!-- Main Content -->
-    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+    <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto">
       <StackPanel Spacing="15">
         
-        <!-- Save Folder -->
-        <c:GroupBox Header="Save Folder">
-          <Grid>
-            <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="*" />
-              <ColumnDefinition Width="Auto" />
-            </Grid.ColumnDefinitions>
-            
-            <TextBox Grid.Column="0" 
-                     Text="{Binding SaveFolder}" 
-                     IsReadOnly="True" 
-                     Margin="0,0,5,0" />
-            
-            <Button Grid.Column="1" 
-                    Content="Open Save Folder" 
-                    Click="OpenFolder_Click"
-                    IsEnabled="{Binding IsOpenFolderEnabled}" />
-          </Grid>
-        </c:GroupBox>
+        <!-- Save Location -->
+        <Grid ColumnDefinitions="Auto,*">
+          <TextBlock Grid.Column="0" Text="Save to:" VerticalAlignment="Center" Margin="0,0,5,0" />
+          <TextBox Grid.Column="1" Text="{Binding SaveFolder}" IsReadOnly="True" />
+        </Grid>
 
         <!-- Scale & Filter Options -->
         <c:GroupBox Header="Scale &amp; Filter Options">
@@ -89,43 +57,16 @@
           </StackPanel>
         </c:GroupBox>
 
-        <!-- SMS-Specific Options -->
-        <c:GroupBox Header="SMS Options">
+        <!-- Recording Options -->
+        <c:GroupBox Header="Recording Settings">
           <StackPanel Spacing="10">
-            
-            <CheckBox Content="Sort tiles by usage frequency" 
-                      IsChecked="{Binding Config.SortByUsageFrequency}"
-                      IsEnabled="{Binding !IsRecording}" />
             
             <CheckBox Content="Group blank tiles" 
                       IsChecked="{Binding Config.GroupBlankTiles}"
                       IsEnabled="{Binding !IsRecording}" />
             
-            <CheckBox Content="Group related sprite tiles (metasprites)" 
-                      IsChecked="{Binding Config.GroupRelatedSpriteTiles}"
-                      IsEnabled="{Binding !IsRecording}" />
-
-            <CheckBox Content="Ignore tiles at the edges of the screen (overscan)" 
-                      IsChecked="{Binding Config.IgnoreOverscan}"
-                      IsEnabled="{Binding !IsRecording}" />
-
-            <CheckBox Content="Dump all palette variants (disables fade optimization)" 
-                      IsChecked="{Binding Config.DumpAllPaletteVariants}"
-                      IsEnabled="{Binding !IsRecording}" />
-
-            <!-- SMS-specific debug options -->
-            <Separator />
-            
-            <CheckBox Content="Debug mode (verbose tile logging)" 
-                      IsChecked="{Binding Config.DebugMode}"
-                      IsEnabled="{Binding !IsRecording}" />
-            
-            <CheckBox Content="Verbose logging" 
-                      IsChecked="{Binding Config.VerboseLogging}"
-                      IsEnabled="{Binding !IsRecording}" />
-            
-            <CheckBox Content="Show palette information" 
-                      IsChecked="{Binding Config.ShowPaletteInfo}"
+            <CheckBox Content="Sort pages by usage frequency" 
+                      IsChecked="{Binding Config.SortByUsageFrequency}"
                       IsEnabled="{Binding !IsRecording}" />
             
             <CheckBox Content="Draw tile borders on PNG sheets" 
@@ -135,49 +76,26 @@
           </StackPanel>
         </c:GroupBox>
 
-        <!-- Recording Status -->
-        <c:GroupBox Header="Recording Status">
-          <StackPanel Spacing="10">
-            
-            <TextBlock Text="Click 'Start Recording' to begin capturing tile data, play through your game, then click 'Stop Recording' to generate the HD pack files." 
-                       TextWrapping="Wrap" 
-                       Margin="0,0,0,5" />
-            
-            <StackPanel Orientation="Horizontal" Spacing="10">
-              <Button Content="Start Recording" 
-                      Click="StartRecording_Click"
-                      IsEnabled="{Binding !IsRecording}"
-                      Background="{DynamicResource SystemAccentColor}"
-                      Foreground="White" />
-              
-              <Button Content="Stop Recording" 
-                      Click="StopRecording_Click"
-                      IsEnabled="{Binding IsRecording}"
-                      Background="{DynamicResource SystemControlBackgroundBaseMediumBrush}" />
-            </StackPanel>
-            
-            <TextBlock Text="Recording in progress..." 
-                       Foreground="Red" 
-                       FontWeight="Bold"
-                       IsVisible="{Binding IsRecording}" />
-
-          </StackPanel>
-        </c:GroupBox>
 
       </StackPanel>
     </ScrollViewer>
 
-    <!-- Footer -->
-    <StackPanel Grid.Row="2" 
-                Orientation="Horizontal" 
-                HorizontalAlignment="Right" 
-                Spacing="10" 
-                Margin="0,10,0,0">
+    <!-- Footer - NES style with Open Folder and Start/Stop toggle -->
+    <Grid Grid.Row="1" ColumnDefinitions="Auto,*,Auto" Margin="0,10,0,0">
+      <Button Grid.Column="0"
+              Content="Open Save Folder" 
+              Click="OpenFolder_Click"
+              IsEnabled="{Binding IsOpenFolderEnabled}" />
       
-      <Button Content="Close" 
-              Click="Close_Click" 
-              IsCancel="True" />
-    </StackPanel>
+      <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="10">
+        <Button Content="Start Recording" 
+                Click="StartRecording_Click"
+                IsVisible="{Binding !IsRecording}" />
+        <Button Content="Stop Recording" 
+                Click="StopRecording_Click"
+                IsVisible="{Binding IsRecording}" />
+      </StackPanel>
+    </Grid>
 
   </Grid>
 </Window>
