@@ -28,9 +28,9 @@ struct HdPackBuilderOptions {
     ScaleFilterType FilterType = ScaleFilterType::Prescale;
     uint32_t Scale = 1;
     uint32_t VramBankSize = 0x1000;
-    bool GroupBlankTiles = false;
-    bool SortByUsageFrequency = false;
-    bool GroupRelatedSpriteTiles = false; // Group related sprite tiles contiguously in sheets
+    bool GroupBlankTiles = true;
+    bool SortByUsageFrequency = true;
+    bool GroupRelatedSpriteTiles = true; // Group related sprite tiles contiguously in sheets
     bool IgnoreOverscan = false;
     bool DebugMode = false;            // Enable debug visualization
     bool UseActualPalette = true;      // Use actual SMS palette colors
