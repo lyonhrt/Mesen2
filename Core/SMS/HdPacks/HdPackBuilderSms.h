@@ -47,6 +47,7 @@ struct HdPackBuilderOptions {
     bool DrawTileBorders = false;      // Draw borders around tiles in PNG sheets
     bool CapturePaletteVariations = false; // Disabled: paletteColors removed from hash, variations are wasted
     bool SkipFadedSprites = true;            // Skip dumping faded sprite variants; apply fade at render time instead
+    bool DedupeByPatternOnly = true;         // Deduplicate by pattern only, ignoring palette variations (reduces tile count)
 };
 
 class HdPackBuilderSms {
@@ -70,6 +71,8 @@ private:
     unordered_map<uint64_t, HdPackTileInfoSms*> _tilesByCanonicalHash;
     // Combined usage count by canonical hash for stable ordering
     unordered_map<uint64_t, uint32_t> _canonicalUsageCount;
+    // Pattern-only deduplication map (ignores palette, for DedupeByPatternOnly mode)
+    unordered_set<uint64_t> _seenPatterns;
     
     // SMS palette data
     uint32_t _palette[SmsHdPackConstants::SMS_PALETTE_SIZE] = {}; // Full SMS palette

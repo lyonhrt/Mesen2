@@ -350,6 +350,16 @@ void HdPackBuilderSms::ProcessTileNesStyle(HdTileKeySms& key, uint32_t tileAddr,
     }
     
     if(!tileExists) {
+        // Pattern-only deduplication: skip if we've already captured this pattern (ignoring palette)
+        if(_options.DedupeByPatternOnly && !isSolid) {
+            uint64_t patternHash = ComputePatternHash(key.TileData, isSprite);
+            if(_seenPatterns.count(patternHash)) {
+                // Already have this pattern, skip this palette variation
+                return;
+            }
+            _seenPatterns.insert(patternHash);
+        }
+        
         // Fade detection: skip dumping faded sprite/BG variants
         // Exempt solid-color tiles — different palettes produce genuinely different colors
         if(_options.SkipFadedSprites && !isSolid && IsFadedVariant(key, isSprite)) {
@@ -846,6 +856,7 @@ void HdPackBuilderSms::StartRecording() {
     _baseTileMap.clear();
     _tilesByPaletteKey.clear();
     _fadedTilesSkipped = 0;
+    _seenPatterns.clear();
     
     // Ensure the save folder exists up-front so users can see it immediately
     FolderUtilities::CreateFolder(_saveFolder);
@@ -1138,6 +1149,10 @@ bool HdPackBuilderSms::LoadExistingPack() {
         _hdData.Tiles.push_back(std::move(hdTile));
         _tilesByKey[key] = rawPtr;
         
+        // Track pattern for DedupeByPatternOnly mode
+        uint64_t patternHash = ComputePatternHash(tileData, isSprite);
+        _seenPatterns.insert(patternHash);
+        
         // Mark with high usage count to preserve order (NES parity)
         _tileUsageCount[key] = 0xFFFFFFFF - loadedCount;
         rawPtr->UsageCount = _tileUsageCount[key];
@@ -1145,7 +1160,7 @@ bool HdPackBuilderSms::LoadExistingPack() {
         loadedCount++;
     }
     
-    MessageManager::Log("[SMS HD Pack] Loaded " + std::to_string(loadedCount) + " existing tiles from pack");
+    MessageManager::Log("[SMS HD Pack] Loaded " + std::to_string(loadedCount) + " existing tiles from pack (patterns tracked: " + std::to_string(_seenPatterns.size()) + ")");
     
     // Count sprites vs backgrounds from loaded tiles
     for(const auto& tile : _hdData.Tiles) {
