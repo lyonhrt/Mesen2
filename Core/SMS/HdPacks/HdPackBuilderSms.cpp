@@ -954,7 +954,7 @@ bool HdPackBuilderSms::LoadExistingPack() {
     }
     
     std::vector<std::string> imgFiles;
-    std::vector<std::tuple<int, std::string, std::string, int, int, bool, uint32_t>> tileEntries; // imgIdx, tileHex, palHex, x, y, isSprite, paletteColors
+    std::vector<std::tuple<int, std::string, std::string, int, int, bool, uint32_t, bool>> tileEntries; // imgIdx, tileHex, palHex, x, y, isSprite, paletteColors, isSg1000
     uint32_t existingScale = 1;
     bool sectionIsSprite = false;
     
@@ -1018,7 +1018,12 @@ bool HdPackBuilderSms::LoadExistingPack() {
                     if(parts.size() >= 8 && !parts[7].empty()) {
                         try { palColors = (uint32_t)std::stoul(parts[7], nullptr, 16); } catch(...) {}
                     }
-                    tileEntries.push_back({imgIdx, parts[1], parts[2], x, y, sectionIsSprite, palColors});
+                    // Parse IsSg1000Mode from field 10 (S or M) if present
+                    bool isSg1000 = false;
+                    if(parts.size() >= 11 && !parts[10].empty()) {
+                        isSg1000 = (parts[10][0] == 'S' || parts[10][0] == 's');
+                    }
+                    tileEntries.push_back({imgIdx, parts[1], parts[2], x, y, sectionIsSprite, palColors, isSg1000});
                 } catch(...) {}
             }
             continue;
@@ -1070,6 +1075,7 @@ bool HdPackBuilderSms::LoadExistingPack() {
         int y = std::get<4>(entry);
         bool isSprite = std::get<5>(entry);
         uint32_t paletteColors = std::get<6>(entry);
+        bool isSg1000 = std::get<7>(entry);
         
         if(imgIdx < 0 || imgIdx >= (int)loadedImages.size()) continue;
         if(loadedImages[imgIdx].empty()) continue;
@@ -1101,6 +1107,7 @@ bool HdPackBuilderSms::LoadExistingPack() {
         hdTile->X = x;
         hdTile->Y = y;
         hdTile->IsVramTile = true;
+        hdTile->IsSg1000Mode = isSg1000;
         
         // Extract HD pixel data from loaded PNG
         uint32_t imgW = imageSizes[imgIdx].first;
@@ -1125,7 +1132,7 @@ bool HdPackBuilderSms::LoadExistingPack() {
         key.PaletteIndex = hdTile->PaletteIndex;  // Must match hash
         key.IsSprite = isSprite;
         key.IsVramTile = true;
-        key.IsSg1000Mode = false;  // Must match hash (default to SMS mode)
+        key.IsSg1000Mode = isSg1000;  // From manifest, must match captured tiles
         
         HdPackTileInfoSms* rawPtr = hdTile.get();
         _hdData.Tiles.push_back(std::move(hdTile));
